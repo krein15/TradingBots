@@ -45,7 +45,7 @@ CONFIG = {
     "max_trades":       3,
     "cooldown_h":       3,
     "interval_min":     30,
-    "session_filter":   True,
+    "session_filter":   False,   # 24/7 — сбор статистики (WR по сессиям одинаковый)
     "session_hours":    [(7, 18)],
     "require_div":      False,  # дивергенция опциональна — даёт бонус но не блокирует
     "journal":          "smc2_journal.json",

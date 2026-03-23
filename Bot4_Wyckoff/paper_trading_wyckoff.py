@@ -62,7 +62,7 @@ CONFIG = {
     "initial_deposit":   50.0,
     "risk_pct":          0.05,
     "max_open_trades":   3,
-    "session_filter":    True,        # торговать только в активные сессии
+    "session_filter":    False,       # 24/7 — сбор статистики (WR по сессиям одинаковый)
     "session_hours":     [(7,18)],    # UTC 7-18 (Лондон + Нью-Йорк)
     "cooldown_hours":    4,          # пауза после лосса 4ч
     "scan_interval":     30,         # каждые 30 минут для 1h/4h
