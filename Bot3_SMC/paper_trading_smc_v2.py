@@ -47,7 +47,7 @@ CONFIG = {
     "interval_min":     30,
     "session_filter":   True,
     "session_hours":    [(7, 18)],
-    "require_div":      True,   # требовать дивергенцию
+    "require_div":      False,  # дивергенция опциональна — даёт бонус но не блокирует
     "journal":          "smc2_journal.json",
     "logfile":          "smc2_log.txt",
 }

@@ -47,7 +47,7 @@ CONFIG = {
     "vol_avg_period":    20,
     "min_usdt_vol":      5_000_000,  # только ликвидные монеты
     # Wyckoff параметры
-    "sc_vol_mult":       3.0,        # снижено до 3x
+    "sc_vol_mult":       2.5,        # снижено до 2.5x
     "ar_min_bounce":     0.03,       # Automatic Rally — отскок минимум 3%
     "st_vol_ratio":      0.6,        # Secondary Test — объём <60% от SC
     "st_price_pct":      0.02,       # ST не уходит дальше 2% от SC лоя
@@ -857,8 +857,8 @@ def main():
           f"Риск: {int(cfg['risk_pct']*100)}%  "
           f"RR цель: 1:{cfg['rr_ratio']}")
     print(f"  SC объём: >{cfg['sc_vol_mult']}x  "
-          f"Spring: {cfg['spring_pct']*100}-"
-          f"{cfg['spring_max_pct']*100}%")
+          f"AR: >{int(cfg['ar_min_bounce']*100)}%  "
+          f"ST: <{int(cfg['st_vol_ratio']*100)}% от SC")
     print(f"  Стратегия редкая — ждём качественные паттерны!")
     print(f"  Остановка: Ctrl+C")
     print("=" * 65)
