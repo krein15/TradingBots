@@ -67,7 +67,9 @@ CONFIG = {
     "rr_ratio":          4.0,
     "commission":       0.001,
     "stop_buffer":      0.001,
-    "max_stop_pct":     0.008,           # стоп >0.8% — не берём (WR падает до 0%)
+    "min_stop_pct":     0.002,           # стоп <0.2% — слишком плотный, выбивается шумом
+    "max_stop_pct":     0.005,           # стоп >0.5% — WR резко падает (данные 314 сд)
+    "bad_hours":        [14, 21, 22],    # WR 7-9% — систематически плохие часы UTC
     "max_wait_bars":    10,
     "btc_ema_period":   50,
     "btc_neutral_zone": 0.01,
@@ -77,6 +79,7 @@ CONFIG = {
     "require_confirmation": True,    # монета должна быть сильнее/слабее BTC
     "confirmation_period":  20,      # свечей для сравнения с BTC
     "cooldown_minutes": 120,         # блокировка монеты после LOSS на 2 часа
+    "session_filter":   False,       # 24/7 — данные не подтвердили преимущество сессий
     "journal_file":     "paper_journal.json",
     "log_file":         "paper_log.txt",
     "scan_interval":    10,          # минут между сканированиями
@@ -269,8 +272,9 @@ def find_signals(df, cfg, btc_trend="neutral", btc_chg=0.0):
             risk  = entry - stop
             if risk <= 0 or entry >= imp_high:
                 continue
-            if entry > 0 and (risk / entry) > cfg.get("max_stop_pct", 1):
-                continue  # стоп слишком большой
+            stop_pct = risk / entry if entry > 0 else 1
+            if stop_pct < cfg.get("min_stop_pct", 0) or stop_pct > cfg.get("max_stop_pct", 1):
+                continue  # стоп вне допустимой зоны 0.2-0.5%
             take = entry + risk * rr
             signals.append({"bar": i, "dir": 1,
                              "entry_limit": round(entry, 6),
@@ -285,8 +289,9 @@ def find_signals(df, cfg, btc_trend="neutral", btc_chg=0.0):
             risk  = stop - entry
             if risk <= 0 or entry <= imp_low:
                 continue
-            if entry > 0 and (risk / entry) > cfg.get("max_stop_pct", 1):
-                continue  # стоп слишком большой
+            stop_pct = risk / entry if entry > 0 else 1
+            if stop_pct < cfg.get("min_stop_pct", 0) or stop_pct > cfg.get("max_stop_pct", 1):
+                continue  # стоп вне допустимой зоны 0.2-0.5%
             take = entry - risk * rr
             if take <= 0:
                 continue
@@ -434,6 +439,13 @@ def run_cycle(exchange, journal, cfg):
     # ── 3. Новые сигналы ──────────────────────
     open_count = len(journal["open"]) + len(journal["pending"])
     new_sigs   = 0
+
+    # Фильтр плохих часов — WR 7-9% (данные 314 сделок)
+    current_hour = datetime.now().hour
+    bad_hours = cfg.get("bad_hours", [])
+    if current_hour in bad_hours:
+        log(f"⏸️  Плохой час {current_hour}:00 UTC (WR<10%) — пропускаем сканирование", cfg)
+        return journal, 0
 
     if open_count < cfg["max_open_trades"]:
         existing = set()
