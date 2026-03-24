@@ -47,8 +47,8 @@ CONFIG = {
     "vol_avg_period":    20,
     "min_usdt_vol":      5_000_000,  # только ликвидные монеты
     # Wyckoff параметры
-    "sc_vol_mult":       2.5,        # снижено до 2.5x
-    "ar_min_bounce":     0.03,       # Automatic Rally — отскок минимум 3%
+    "sc_vol_mult":       2.0,        # снижено до 2.0x — 2.5 слишком редко в крипте
+    "ar_min_bounce":     0.015,      # снижено до 1.5% — 3% слишком строгий AR
     "st_vol_ratio":      0.6,        # Secondary Test — объём <60% от SC
     "st_price_pct":      0.02,       # ST не уходит дальше 2% от SC лоя
     "spring_pct":        0.005,      # Spring пробивает SC лой на 0.5-3%
@@ -62,10 +62,10 @@ CONFIG = {
     "initial_deposit":   50.0,
     "risk_pct":          0.05,
     "max_open_trades":   3,
-    "session_filter":    False,       # 24/7 — сбор статистики (WR по сессиям одинаковый)
+    "session_filter":    True,        # торговать только в активные сессии
     "session_hours":     [(7,18)],    # UTC 7-18 (Лондон + Нью-Йорк)
     "cooldown_hours":    4,          # пауза после лосса 4ч
-    "scan_interval":     30,         # каждые 30 минут для 1h/4h
+    "scan_interval":     15,         # снижено с 30 — не пропускаем формирующиеся паттерны
     "journal_file":      "wyckoff_journal.json",
     "log_file":          "wyckoff_log.txt",
 }
@@ -162,7 +162,7 @@ def get_symbols(exchange, min_vol):
 
 def fetch_candles(exchange, symbol, timeframe, limit, cfg):
     try:
-        ms_map = {"1h":3600000,"4h":14400000,"1d":86400000}
+        ms_map = {"1h":3600000,"4h":14400000,"1d":86400000,"30m":1800000}
         ms    = ms_map.get(timeframe, 3600000)
         since = exchange.milliseconds() - limit * ms - ms * 10
         raw   = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
@@ -595,7 +595,7 @@ def run_cycle(exchange, journal, cfg):
 
     existing = set()
     for p in journal["pending"] + journal["open"]:
-        existing.add(f"{p['symbol']}_{p['dir']}")
+        existing.add(p["symbol"])  # дедупликация по символу — Wyckoff только лонги
 
     on_cooldown = set()
     for t in journal["trades"]:
@@ -637,7 +637,7 @@ def run_cycle(exchange, journal, cfg):
             # Берём сигнал с лучшим RR
             all_sigs.sort(key=lambda x: x["rr"], reverse=True)
             sig = all_sigs[0]
-            key = f"{sym}_{sig['dir']}"
+            key = sym  # только по символу
 
             if key in existing:
                 continue

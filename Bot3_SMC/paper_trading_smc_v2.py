@@ -28,7 +28,7 @@ except ImportError:
     HAS_DIV = False
 
 CONFIG = {
-    "timeframes":       ["1h", "4h"],
+    "timeframes":       ["15m", "1h", "4h"],  # добавлен 15m — больше MSS сигналов
     "candles":          200,
     "vol_period":       20,
     "min_vol":          2.0,
@@ -44,8 +44,9 @@ CONFIG = {
     "risk_pct":         0.05,
     "max_trades":       3,
     "cooldown_h":       3,
-    "interval_min":     30,
-    "session_filter":   False,   # 24/7 — сбор статистики (WR по сессиям одинаковый)
+    "max_stop_pct":     0.005,           # стоп >0.5% — не берём (WR 5% vs 11%)
+    "interval_min":     15,              # снижено с 30 — не пропускаем 15m свечи
+    "session_filter":   True,
     "session_hours":    [(7, 18)],
     "require_div":      False,  # дивергенция опциональна — даёт бонус но не блокирует
     "journal":          "smc2_journal.json",
@@ -116,7 +117,7 @@ def get_symbols(ex, min_vol):
 
 def fetch_df(ex, symbol, tf, limit, cfg):
     try:
-        ms_map = {"15m":900000,"1h":3600000,"4h":14400000,"1d":86400000}
+        ms_map = {"15m":900000,"30m":1800000,"1h":3600000,"4h":14400000,"1d":86400000}
         ms = ms_map.get(tf, 3600000)
         since = ex.milliseconds() - limit * ms - ms * 10
         raw = ex.fetch_ohlcv(symbol, tf, since=since, limit=limit)
@@ -157,7 +158,7 @@ def get_btc_trend(ex, cfg):
 
 def get_htf_trend(ex, symbol, cfg):
     try:
-        tf_map = {"1h": "4h", "4h": "1d"}
+        tf_map = {"15m": "1h", "1h": "4h", "4h": "1d"}
         htf = tf_map.get(cfg["timeframes"][0], "4h")
         df  = fetch_df(ex, symbol, htf, 60, cfg)
         if df is None:
@@ -227,6 +228,8 @@ def find_mss_ob(df, cfg, htf_trend):
             risk  = stop - entry
             if risk <= 0:
                 continue
+            if entry > 0 and (risk / entry) > cfg.get("max_stop_pct", 1):
+                continue  # стоп слишком большой
             take = entry - risk * rr
             if take <= 0:
                 continue
@@ -267,6 +270,8 @@ def find_mss_ob(df, cfg, htf_trend):
             risk  = entry - stop
             if risk <= 0:
                 continue
+            if entry > 0 and (risk / entry) > cfg.get("max_stop_pct", 1):
+                continue  # стоп слишком большой
             take = entry + risk * rr
 
             signals.append({

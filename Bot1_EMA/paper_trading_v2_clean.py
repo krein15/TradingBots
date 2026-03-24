@@ -54,7 +54,7 @@ import numpy as np
 from datetime import datetime
 
 CONFIG = {
-    "timeframes":       ["5m", "15m"],
+    "timeframes":       ["5m"],              # 15m убран — WR 0% на 14 сделках
     "trend_timeframe":  "15m",           # только 15м определяет тренд BTC
     "candles":          300,
     "impulse_candles":  3,
@@ -67,6 +67,7 @@ CONFIG = {
     "rr_ratio":          4.0,
     "commission":       0.001,
     "stop_buffer":      0.001,
+    "max_stop_pct":     0.008,           # стоп >0.8% — не берём (WR падает до 0%)
     "max_wait_bars":    10,
     "btc_ema_period":   50,
     "btc_neutral_zone": 0.01,
@@ -89,11 +90,11 @@ TIMEFRAME_LABELS = {"1m":"1м","5m":"5м","15m":"15м","1h":"1ч"}
 # ─────────────────────────────────────────────
 def is_active_session(cfg):
     """
-    Режим 24/7 — торгуем во все часы для сбора статистики.
-    session_filter=False отключает ограничение по сессиям.
-    Лондон:   07:00 - 12:00 UTC
-    Нью-Йорк: 13:00 - 18:00 UTC
-    Азия/ночь: торгуем (статистика не выявила преимущества сессий)
+    Торгуем только в активные сессии (UTC):
+    Лондон:   07:00 - 12:00
+    Нью-Йорк: 13:00 - 18:00
+    Пересечение: 13:00 - 17:00 — самое активное время
+    Ночь Азии: пропускаем (низкий объём, много ложных сигналов)
     """
     if not cfg.get("session_filter", True):
         return True, "все сессии"
@@ -268,6 +269,8 @@ def find_signals(df, cfg, btc_trend="neutral", btc_chg=0.0):
             risk  = entry - stop
             if risk <= 0 or entry >= imp_high:
                 continue
+            if entry > 0 and (risk / entry) > cfg.get("max_stop_pct", 1):
+                continue  # стоп слишком большой
             take = entry + risk * rr
             signals.append({"bar": i, "dir": 1,
                              "entry_limit": round(entry, 6),
@@ -282,6 +285,8 @@ def find_signals(df, cfg, btc_trend="neutral", btc_chg=0.0):
             risk  = stop - entry
             if risk <= 0 or entry <= imp_low:
                 continue
+            if entry > 0 and (risk / entry) > cfg.get("max_stop_pct", 1):
+                continue  # стоп слишком большой
             take = entry - risk * rr
             if take <= 0:
                 continue
