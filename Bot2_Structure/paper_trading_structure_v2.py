@@ -32,7 +32,7 @@ import numpy as np
 from datetime import datetime
 
 CONFIG = {
-    "timeframes":       ["5m", "15m"],
+    "timeframes":       ["30m", "15m"],  # 5m убран (WR 10%), 30m — чище структура
     "candles":          300,
     "swing_bars":       5,
     "vol_avg_period":   20,
@@ -40,6 +40,7 @@ CONFIG = {
     "min_swing_pct":    0.015,   # минимальный диапазон свингов 1.5%
     "entry_fibo":       0.5,     # вход на 50% отката
     "stop_buffer":      0.001,
+    "max_stop_pct":     0.012,           # стоп >1.2% — не берём
     "rr_ratio":          4.0,
     "max_entry_miss":   0.03,
     "max_wait_bars":    8,
@@ -47,8 +48,12 @@ CONFIG = {
     "initial_deposit":  50.0,
     "risk_pct":         0.05,
     "max_open_trades":  5,
-    "session_filter":    False,       # 24/7 — сбор статистики (WR по сессиям одинаковый)
-    "session_hours":     [(7,18)],    # UTC 7-18 (Лондон + Нью-Йорк)
+    "session_filter":   False,           # 24/7 — сессионный фильтр не даёт преимущества
+    "session_hours":    [(7, 18)],
+    "htf_ema_period":   50,              # EMA период для HTF тренда монеты
+    "htf_neutral_zone": 0.005,           # ±0.5% нейтральная зона EMA
+    "require_div":      False,           # дивергенция как фильтр (не блокирует)
+    "div_boost":        True,            # при наличии дивергенции — берём охотнее
     "cooldown_hours":   2,
     "scan_interval":    10,
     "journal_file":     "structure2_journal.json",
@@ -134,7 +139,7 @@ def get_symbols(exchange, min_vol):
 
 def fetch_candles(exchange, symbol, timeframe, limit, cfg):
     try:
-        ms_map = {"1m":60000,"5m":300000,"15m":900000,"1h":3600000}
+        ms_map = {"1m":60000,"5m":300000,"15m":900000,"30m":1800000,"1h":3600000,"4h":14400000}
         ms    = ms_map.get(timeframe, 300000)
         since = exchange.milliseconds() - limit * ms - ms * 20
         raw   = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
@@ -155,6 +160,53 @@ def get_price(exchange, symbol):
         return exchange.fetch_ticker(symbol)["last"]
     except Exception:
         return None
+
+
+# ─────────────────────────────────────────────
+#  HTF ТРЕНД
+# ─────────────────────────────────────────────
+def get_htf_trend(exchange, symbol, tf, cfg):
+    """
+    Тренд монеты на старшем таймфрейме по EMA50.
+    tf_map: 15m→1h, 30m→1h, 1h→4h
+    Возвращает: "bull" | "bear" | "neutral"
+    """
+    tf_map = {"5m": "15m", "15m": "1h", "30m": "1h", "1h": "4h"}
+    htf    = tf_map.get(tf, "1h")
+    try:
+        df = fetch_candles(exchange, symbol, htf, 60, cfg)
+        if df is None or len(df) < 55:
+            return "neutral"
+        ema   = df["close"].ewm(span=cfg.get("htf_ema_period", 50), adjust=False).mean()
+        lc    = df["close"].iloc[-1]
+        le    = ema.iloc[-1]
+        zone  = cfg.get("htf_neutral_zone", 0.005)
+        diff  = (lc - le) / le
+        if diff > zone:  return "bull"
+        if diff < -zone: return "bear"
+        return "neutral"
+    except Exception:
+        return "neutral"
+
+
+def get_btc_trend(exchange, tf, cfg):
+    """
+    Глобальный тренд по BTC/USDT EMA50 на 1h.
+    Возвращает: "bull" | "bear" | "neutral"
+    """
+    try:
+        df = fetch_candles(exchange, "BTC/USDT", "1h", 60, cfg)
+        if df is None or len(df) < 55:
+            return "neutral"
+        ema  = df["close"].ewm(span=50, adjust=False).mean()
+        lc   = df["close"].iloc[-1]
+        le   = ema.iloc[-1]
+        diff = (lc - le) / le
+        if diff > 0.005:  return "bull"
+        if diff < -0.005: return "bear"
+        return "neutral"
+    except Exception:
+        return "neutral"
 
 
 # ─────────────────────────────────────────────
@@ -181,7 +233,13 @@ def get_swings(df, n=5):
 # ─────────────────────────────────────────────
 #  СТРУКТУРА И СИГНАЛЫ
 # ─────────────────────────────────────────────
-def find_signals(df, cfg):
+def find_signals(df, cfg, htf_trend="neutral"):
+    """
+    htf_trend — тренд монеты на старшем TF (bull/bear/neutral).
+    Лонг разрешён при htf_trend in (bull, neutral).
+    Шорт разрешён при htf_trend in (bear, neutral).
+    Дивергенция RSI — дополнительное подтверждение.
+    """
     n        = cfg["swing_bars"]
     min_sw   = cfg["min_swing_pct"]
     fibo     = cfg["entry_fibo"]
@@ -190,6 +248,14 @@ def find_signals(df, cfg):
     min_vol  = cfg["min_vol_mult"]
     miss     = cfg["max_entry_miss"]
     signals  = []
+
+    # Дивергенция RSI на всём датафрейме
+    div_type, div_strength = None, 0
+    if HAS_DIV:
+        try:
+            div_type, div_strength = find_divergence(df)
+        except Exception:
+            pass
 
     sh_list, sl_list = get_swings(df, n)
 
@@ -217,13 +283,17 @@ def find_signals(df, cfg):
 
     if lh and ll:
         # ── МЕДВЕЖЬЯ СТРУКТУРА → шорт ─────────
-        # Вход на откате к 50% последнего импульса вниз
-        # Импульс: от sh1 до sl1
+        # HTF фильтр: не шортуем против бычьего HTF тренда
+        if htf_trend == "bull":
+            return signals  # HTF бычий — шорт на локальной структуре ненадёжен
+
         entry = sh1 - spread * fibo   # 50% отката вверх от sl1
         stop  = sh1 * (1 + buf)       # стоп за последний LH
         risk  = stop - entry
         if risk <= 0:
             return signals
+        if entry > 0 and (risk / entry) > cfg.get("max_stop_pct", 1):
+            return signals  # стоп слишком большой
         take = entry - risk * rr
         if take <= 0:
             return signals
@@ -236,6 +306,9 @@ def find_signals(df, cfg):
         if vol_now < min_vol:
             return signals
 
+        # Дивергенция: медвежья — подтверждает шорт
+        has_bearish_div = (div_type == "bearish")
+
         signals.append({
             "dir":         -1,
             "entry_limit": round(entry, 6),
@@ -247,15 +320,24 @@ def find_signals(df, cfg):
             "spread_pct":  round(spread / sl1 * 100, 2),
             "vol_ratio":   round(vol_now, 1),
             "rr":          round((entry - take) / risk, 2),
+            "htf_trend":   htf_trend,
+            "div_type":    div_type or "none",
+            "div_confirm": has_bearish_div,
         })
 
     elif hh and hl:
         # ── БЫЧЬЯ СТРУКТУРА → лонг ────────────
+        # HTF фильтр: не лонгуем против медвежьего HTF тренда
+        if htf_trend == "bear":
+            return signals  # HTF медвежий — лонг на локальной структуре ненадёжен
+
         entry = sl1 + spread * fibo
         stop  = sl1 * (1 - buf)
         risk  = entry - stop
         if risk <= 0:
             return signals
+        if entry > 0 and (risk / entry) > cfg.get("max_stop_pct", 1):
+            return signals  # стоп слишком большой
         take = entry + risk * rr
 
         diff = abs(close_now - entry) / entry
@@ -264,6 +346,9 @@ def find_signals(df, cfg):
 
         if vol_now < min_vol:
             return signals
+
+        # Дивергенция: бычья — подтверждает лонг
+        has_bullish_div = (div_type == "bullish")
 
         signals.append({
             "dir":         1,
@@ -276,6 +361,9 @@ def find_signals(df, cfg):
             "spread_pct":  round(spread / sl1 * 100, 2),
             "vol_ratio":   round(vol_now, 1),
             "rr":          round((take - entry) / risk, 2),
+            "htf_trend":   htf_trend,
+            "div_type":    div_type or "none",
+            "div_confirm": has_bullish_div,
         })
 
     return signals
@@ -421,7 +509,11 @@ def run_cycle(exchange, journal, cfg):
             if df is None:
                 continue
 
-            sigs = find_signals(df, cfg)
+            # HTF тренд монеты — ключевой фильтр направления
+            htf_trend = get_htf_trend(exchange, sym, tf, cfg)
+            time.sleep(0.08)
+
+            sigs = find_signals(df, cfg, htf_trend)
             if not sigs:
                 continue
 
@@ -441,7 +533,9 @@ def run_cycle(exchange, journal, cfg):
             open_count += 1
             new_sigs   += 1
             d_ru = "ЛОНГ" if sig["dir"] == 1 else "ШОРТ"
+            div_info = f" div={sig['div_type']}" if sig.get("div_type", "none") != "none" else ""
             log(f"➕ СИГНАЛ  {sym} [{tf}] {d_ru} [{sig['structure']}] "
+                f"HTF={htf_trend}{div_info}  "
                 f"диапазон={sig['spread_pct']}%  объём={sig['vol_ratio']}x  "
                 f"лимит={sig['entry_limit']}  стоп={sig['stop']}  "
                 f"тейк={sig['take']}", cfg)
