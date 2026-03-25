@@ -1,0 +1,7 @@
+# Принудительно UTF-8 для всех текстовых файлов
+* text=auto eol=lf
+*.py text eol=lf encoding=utf-8
+*.bat text eol=crlf encoding=utf-8
+*.md text eol=lf encoding=utf-8
+*.json text eol=lf encoding=utf-8
+*.txt text eol=lf encoding=utf-8
