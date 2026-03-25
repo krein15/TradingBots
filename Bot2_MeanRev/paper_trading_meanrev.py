@@ -190,7 +190,8 @@ def find_signals(df, cfg):
 
     # ЛОНГ: RSI перепродан + цена у нижней BB
     if ind["rsi"] <= cfg["rsi_oversold"]:
-        near_dn = close_now <= ind["bb_dn"] * 1.005
+        # Цена должна быть ОКОЛО нижней BB — не выше на 0.3%
+        near_dn = ind["bb_dn"] * 0.997 <= close_now <= ind["bb_dn"] * 1.003
         if near_dn:
             entry = close_now
             stop  = ind["bb_dn"] * (1 - buf)
@@ -215,7 +216,8 @@ def find_signals(df, cfg):
 
     # ШОРТ: RSI перекуплен + цена у верхней BB
     if ind["rsi"] >= cfg["rsi_overbought"]:
-        near_up = close_now >= ind["bb_up"] * 0.995
+        # Цена должна быть ОКОЛО верхней BB — не ниже на 0.3%
+        near_up = ind["bb_up"] * 0.997 <= close_now <= ind["bb_up"] * 1.003
         if near_up:
             entry = close_now
             stop  = ind["bb_up"] * (1 + buf)
@@ -266,8 +268,9 @@ def run_cycle(ex, journal, cfg):
             new_pending.append(p); continue
         p["waited"] = p.get("waited", 0) + 1
         d, entry = p["dir"], p["entry"]
-        hit = (d == 1 and price <= entry * 1.003) or \
-              (d == -1 and price >= entry * 0.997)
+        # Лимитный ордер: цена должна быть близко к уровню входа
+        hit = (d == 1 and entry * 0.997 <= price <= entry * 1.003) or \
+              (d == -1 and entry * 0.997 <= price <= entry * 1.003)
         if hit:
             risk = abs(entry - p["stop"])
             qty  = (balance * cfg["risk_pct"]) / risk if risk > 0 else 0

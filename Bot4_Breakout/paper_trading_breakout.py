@@ -33,7 +33,8 @@ CONFIG = {
     "consol_bars":      10,        # свечей консолидации
     "atr_squeeze":      0.7,       # ATR < 70% от среднего = сжатие
     "breakout_vol":     2.0,       # объём на пробое > 2x
-    "min_breakout_pct": 0.005,     # минимальный пробой 0.5%
+    "min_breakout_pct": 0.003,     # минимальный пробой 0.3%
+    "max_entry_miss":   0.005,     # цена не ушла более 0.5% от входа
     "min_usdt_vol":     2_000_000,
     "rr":               3.0,
     "commission":       0.001,
@@ -155,11 +156,15 @@ def find_signals(df, cfg):
     last     = df.iloc[-1]
     prev_n   = df.iloc[-(n+1):-1]  # N свечей до последней
 
-    # Проверка сжатия ATR
-    atr_last = atr.iloc[-2]
-    atr_mean = atr_avg.iloc[-2]
-    if atr_mean <= 0 or atr_last / atr_mean > cfg["atr_squeeze"]:
-        return signals  # нет сжатия
+    # Проверка сжатия ATR — последние N свечей ATR должен быть сжат
+    atr_last  = atr.iloc[-2]
+    atr_mean  = atr_avg.iloc[-2]
+    # Проверяем что ATR последних N свечей в среднем ниже нормы
+    atr_consol = atr.iloc[-(n+2):-2].mean()
+    if atr_mean <= 0:
+        return signals
+    if atr_consol / atr_mean > cfg["atr_squeeze"]:
+        return signals  # нет сжатия ATR в зоне консолидации
 
     # Уровни консолидации
     consol_high = prev_n["high"].max()
@@ -171,6 +176,12 @@ def find_signals(df, cfg):
     vol_now = last["vol_ratio"]
     if vol_now < cfg["breakout_vol"]:
         return signals  # нет объёма
+
+    # Проверяем что пробой произошёл на ПОСЛЕДНЕЙ свече
+    # (не на исторической — иначе момент упущен)
+    prev_close = df.iloc[-2]["close"]
+    if prev_close > consol_high or prev_close < consol_low:
+        return signals  # пробой уже произошёл раньше — опоздали
 
     # Пробой вверх
     if last["close"] > consol_high and \
@@ -243,8 +254,9 @@ def run_cycle(ex, journal, cfg):
             new_pending.append(p); continue
         p["waited"] = p.get("waited",0) + 1
         d, entry = p["dir"], p["entry"]
-        hit = (d == 1 and price <= entry * 1.003) or \
-              (d == -1 and price >= entry * 0.997)
+        # Лимитный ордер: цена должна быть близко к уровню входа
+        hit = (d == 1 and entry * 0.997 <= price <= entry * 1.003) or \
+              (d == -1 and entry * 0.997 <= price <= entry * 1.003)
         if hit:
             risk = abs(entry - p["stop"])
             qty  = (balance * cfg["risk_pct"]) / risk if risk > 0 else 0

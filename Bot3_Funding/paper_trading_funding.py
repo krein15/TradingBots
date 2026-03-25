@@ -52,7 +52,7 @@ CONFIG = {
     "risk_pct":          0.05,
     "max_trades":        4,
     "cooldown_h":        3,
-    "interval_min":      60,       # FR обновляется каждые 8 часов
+    "interval_min":      15,       # сканируем часто — цена меняется постоянно
     "journal":           "funding_journal.json",
     "logfile":           "funding_log.txt",
 }
@@ -253,8 +253,9 @@ def run_cycle(ex, journal, cfg):
             new_pending.append(p); continue
         p["waited"] = p.get("waited", 0) + 1
         d, entry = p["dir"], p["entry"]
-        hit = (d == 1 and price <= entry * 1.003) or \
-              (d == -1 and price >= entry * 0.997)
+        # Лимитный ордер: цена должна быть близко к уровню входа
+        hit = (d == 1 and entry * 0.997 <= price <= entry * 1.003) or \
+              (d == -1 and entry * 0.997 <= price <= entry * 1.003)
         if hit:
             risk = abs(entry - p["stop"])
             qty  = (balance * cfg["risk_pct"]) / risk if risk > 0 else 0
@@ -464,7 +465,7 @@ def main():
     print(f"  FR > {cfg['fr_long_threshold']*100}% → ШОРТ (все лонгуют)")
     print(f"  FR < {cfg['fr_short_threshold']*100}% → ЛОНГ (все шортят)")
     print(f"  Биржа: Bitget фьючерсы  RR 1:{cfg['rr']}")
-    print(f"  Интервал: {cfg['interval_min']} мин")
+    print(f"  Интервал: {cfg['interval_min']} мин  (FR обновляется каждые 8ч)")
     print("="*62)
 
     log("="*50, cfg)
