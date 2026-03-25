@@ -39,7 +39,7 @@ CONFIG = {
     "min_usdt_vol":     1_000_000,
     "rr":               2.0,       # RR 1:2 (тейк = средняя BB)
     "commission":       0.001,
-    "buf":              0.002,
+    "buf":              0.005,   # увеличен — стоп дальше от цены
     "max_wait":         8,
     "deposit":          50.0,
     "risk_pct":         0.05,

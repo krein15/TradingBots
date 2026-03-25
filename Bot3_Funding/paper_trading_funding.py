@@ -254,8 +254,10 @@ def run_cycle(ex, journal, cfg):
         p["waited"] = p.get("waited", 0) + 1
         d, entry = p["dir"], p["entry"]
         # Лимитный ордер: цена должна быть близко к уровню входа
-        hit = (d == 1 and entry * 0.997 <= price <= entry * 1.003) or \
-              (d == -1 and entry * 0.997 <= price <= entry * 1.003)
+        # Funding Rate — входим по рынку при первом цикле
+        # Цена FR сигнала = текущая цена, поэтому ±1% допуск
+        hit = (d == 1 and entry * 0.990 <= price <= entry * 1.010) or \
+              (d == -1 and entry * 0.990 <= price <= entry * 1.010)
         if hit:
             risk = abs(entry - p["stop"])
             qty  = (balance * cfg["risk_pct"]) / risk if risk > 0 else 0

@@ -31,8 +31,8 @@ CONFIG = {
     "vol_period":       20,
     "atr_period":       14,
     "consol_bars":      10,        # свечей консолидации
-    "atr_squeeze":      0.7,       # ATR < 70% от среднего = сжатие
-    "breakout_vol":     2.0,       # объём на пробое > 2x
+    "atr_squeeze":      0.9,       # ATR < 90% от среднего = сжатие
+    "breakout_vol":     1.5,       # снижено до 1.5x
     "min_breakout_pct": 0.003,     # минимальный пробой 0.3%
     "max_entry_miss":   0.005,     # цена не ушла более 0.5% от входа
     "min_usdt_vol":     2_000_000,
@@ -255,8 +255,9 @@ def run_cycle(ex, journal, cfg):
         p["waited"] = p.get("waited",0) + 1
         d, entry = p["dir"], p["entry"]
         # Лимитный ордер: цена должна быть близко к уровню входа
-        hit = (d == 1 and entry * 0.997 <= price <= entry * 1.003) or \
-              (d == -1 and entry * 0.997 <= price <= entry * 1.003)
+        # Breakout — вход по рынку, широкая зона
+        hit = (d == 1 and entry * 0.993 <= price <= entry * 1.007) or \
+              (d == -1 and entry * 0.993 <= price <= entry * 1.007)
         if hit:
             risk = abs(entry - p["stop"])
             qty  = (balance * cfg["risk_pct"]) / risk if risk > 0 else 0
