@@ -23,6 +23,77 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import time
+import json
+import os
+
+# ── Пути к файлам состояния ──────────────────────────────────
+SHARED_STATE_PATH  = "C:\\TradingBots\\shared_state.json"
+REGIME_HISTORY_PATH = "C:\\TradingBots\\ML\\regime_history.jsonl"
+
+
+def save_regime(regime, confidence, details):
+    """
+    Сохраняем текущий режим в shared_state.json (для ботов)
+    и дописываем строку в regime_history.jsonl (для ML).
+    """
+    now = datetime.now().isoformat()
+    bot, desc = regime_to_strategy(regime)
+
+    # shared_state.json — текущий режим, боты читают перед сканированием
+    state = {
+        "regime":      regime,
+        "confidence":  confidence,
+        "recommended_bot": bot,
+        "description": desc,
+        "updated_at":  now,
+        "details":     details,
+    }
+    try:
+        os.makedirs(os.path.dirname(SHARED_STATE_PATH), exist_ok=True)
+        with open(SHARED_STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"  [!] Ошибка записи shared_state: {e}")
+
+    # regime_history.jsonl — история режимов, одна строка = одно измерение
+    record = {
+        "ts":         now,
+        "regime":     regime,
+        "confidence": confidence,
+        "adx":        details.get("adx"),
+        "atr_ratio":  details.get("atr_ratio"),
+        "bb_width":   details.get("bb_width"),
+        "plus_di":    details.get("plus_di"),
+        "minus_di":   details.get("minus_di"),
+        "btc_close":  details.get("close"),
+        "ema50":      details.get("ema50"),
+    }
+    try:
+        os.makedirs(os.path.dirname(REGIME_HISTORY_PATH), exist_ok=True)
+        with open(REGIME_HISTORY_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"  [!] Ошибка записи regime_history: {e}")
+
+
+def read_regime():
+    """
+    Читаем текущий режим из shared_state.json.
+    Боты вызывают эту функцию перед сканированием.
+    Возвращает dict или None если файл не найден/устарел.
+    """
+    try:
+        with open(SHARED_STATE_PATH, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        # Проверяем свежесть — не старше 60 минут
+        updated = datetime.fromisoformat(state["updated_at"])
+        age_min = (datetime.now() - updated).total_seconds() / 60
+        if age_min > 60:
+            return None  # данные устарели
+        return state
+    except Exception:
+        return None
+
 
 def get_exchange():
     return ccxt.binance({"enableRateLimit": True})
@@ -121,8 +192,8 @@ def get_market_regime(ex=None):
         "atr_ratio":  atr_ratio,
         "bb_width":   bb_width,
         "bb_avg":     bb_avg,
-        "bb_squeeze": bb_squeeze,
-        "bb_expansion":bb_expansion,
+        "bb_squeeze": bool(bb_squeeze),     # явный Python bool для JSON
+        "bb_expansion": bool(bb_expansion),  # явный Python bool для JSON
         "ema20":      round(ema20, 2),
         "ema50":      round(ema50, 2),
         "close":      round(close, 2),
@@ -207,10 +278,12 @@ if __name__ == "__main__":
         try:
             regime, confidence, details = get_market_regime(ex)
             print_regime_report(regime, confidence, details)
+            save_regime(regime, confidence, details)
 
             bot, desc = regime_to_strategy(regime)
             ts = datetime.now().strftime("%Y-%m-%d %H:%M")
             print(f"  [{ts}] {regime} → запускай {bot}")
+            print(f"  [+] Сохранено в shared_state.json и regime_history.jsonl")
             print(f"  Следующая проверка через 30 минут...")
             time.sleep(30 * 60)
 

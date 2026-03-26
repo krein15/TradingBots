@@ -295,6 +295,8 @@ def run_cycle(ex, journal, cfg):
                 "entry":round(entry,6),"exit":round(exit_p,6),
                 "vol":pos.get("vol",0),
                 "atr_ratio":pos.get("atr_ratio",0),
+                "regime":pos.get("regime","?"),
+                "regime_conf":pos.get("regime_conf",0),
                 "pnl":round(pnl,4),"result":result,
                 "balance":round(balance,4),"closed":now,
             })
@@ -343,13 +345,24 @@ def run_cycle(ex, journal, cfg):
             if sig["dir"] == -1 and btc == "bull": continue
             key = f"{sym}_{sig['dir']}"
             if key in existing: continue
+            _regime, _rconf = "?", 0
+            try:
+                import json as _j
+                with open("C:\\TradingBots\\shared_state.json") as _f:
+                    _s = _j.load(_f)
+                _regime, _rconf = _s.get("regime","?"), _s.get("confidence",0)
+            except Exception:
+                pass
+
             journal["pending"].append({
                 "symbol":sym,"tf":tf,
                 "dir":sig["dir"],"entry":sig["entry"],
                 "stop":sig["stop"],"take":sig["take"],
                 "type":sig["type"],"vol":sig["vol"],
                 "atr_ratio":sig["atr_ratio"],
-                "rr":sig["rr"],"added":now,"waited":0,
+                "rr":sig["rr"],
+                "regime":_regime,"regime_conf":_rconf,
+                "added":now,"waited":0,
             })
             existing.add(key)
             open_cnt += 1

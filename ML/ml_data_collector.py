@@ -3,17 +3,18 @@ ml_data_collector.py
 ====================
 Сборщик данных для обучения ML модели.
 
-Собирает все сделки всех ботов в единый датасет
-с расширенными признаками для обучения.
+Поддерживает все 4 бота:
+  Bot1 EMA       — paper_journal.json
+  Bot2 MeanRev   — meanrev_journal.json
+  Bot3 Funding   — funding_journal.json
+  Bot4 Breakout  — breakout_journal.json
 
 Запуск:
   python ml_data_collector.py
 
 Результат:
-  ml_dataset.csv — полный датасет для ML
-  ml_dataset_summary.txt — краткая сводка
-
-Положи в C:\\TradingBots\\
+  ML\\ml_dataset.csv
+  ML\\ml_dataset_summary.txt
 """
 
 import os, json
@@ -21,162 +22,230 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 
-# Пути к журналам всех ботов
+# ── Пути к журналам ───────────────────────────────────────────
 JOURNALS = [
     {
-        "name":    "EMA",
-        "path":    "C:\\TradingBots\\Bot1_EMA\\paper_journal.json",
-        "logpath": "C:\\TradingBots\\Bot1_EMA\\paper_log.txt",
+        "name": "EMA",
+        "path": "C:\\TradingBots\\Bot1_EMA\\paper_journal.json",
     },
     {
-        "name":    "Structure",
-        "path":    "C:\\TradingBots\\Bot2_Structure\\structure2_journal.json",
-        "path2":   "C:\\TradingBots\\Bot2_Structure\\paper_journal_structure.json",
-        "logpath": "C:\\TradingBots\\Bot2_Structure\\structure2_log.txt",
+        "name": "MeanRev",
+        "path": "C:\\TradingBots\\Bot2_MeanRev\\meanrev_journal.json",
     },
     {
-        "name":    "SMC",
-        "path":    "C:\\TradingBots\\Bot3_SMC\\smc_journal.json",
-        "logpath": "C:\\TradingBots\\Bot3_SMC\\smc_log.txt",
+        "name": "Funding",
+        "path": "C:\\TradingBots\\Bot3_Funding\\funding_journal.json",
     },
     {
-        "name":    "Wyckoff",
-        "path":    "C:\\TradingBots\\Bot4_Wyckoff\\wyckoff_journal.json",
-        "logpath": "C:\\TradingBots\\Bot4_Wyckoff\\wyckoff_log.txt",
+        "name": "Breakout",
+        "path": "C:\\TradingBots\\Bot4_Breakout\\breakout_journal.json",
     },
 ]
 
-OUTPUT_DIR = "C:\\TradingBots\\ML"
+OUTPUT_DIR          = "C:\\TradingBots\\ML"
+REGIME_HISTORY_PATH = "C:\\TradingBots\\ML\\regime_history.jsonl"
+SHARED_STATE_PATH   = "C:\\TradingBots\\shared_state.json"
+
+INITIAL_DEPOSIT = 50.0  # для расчёта risk_pct когда stop не сохранён
+
+
+def load_regime_history():
+    """
+    Загружаем историю режимов из regime_history.jsonl.
+    Возвращаем список записей отсортированных по времени.
+    """
+    records = []
+    try:
+        with open(REGIME_HISTORY_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    records.append(json.loads(line))
+        records.sort(key=lambda x: x["ts"])
+    except Exception:
+        pass
+    return records
+
+
+def get_regime_at(closed_at, regime_records):
+    """
+    Находим режим рынка в момент закрытия сделки.
+    Берём последнюю запись режима ДО closed_at.
+    """
+    if not regime_records or not closed_at:
+        return "?", 0
+    best = None
+    for r in regime_records:
+        if r["ts"] <= closed_at:
+            best = r
+        else:
+            break
+    if best:
+        return best["regime"], best["confidence"]
+    return "?", 0
 
 
 def load_journal(bot):
-    for key in ["path", "path2", "path3"]:
-        p = bot.get(key)
-        if p and os.path.exists(p):
-            with open(p, "r", encoding="utf-8") as f:
-                return json.load(f)
+    p = bot.get("path")
+    if p and os.path.exists(p):
+        with open(p, "r", encoding="utf-8") as f:
+            return json.load(f)
     return None
 
 
-def extract_features(trade, bot_name):
-    """
-    Извлекаем все доступные признаки из сделки.
-    Это будут входные данные для ML модели.
-    """
-    # Базовые данные
-    closed_at = trade.get("closed_at", trade.get("close", ""))
+def parse_time(closed_at):
+    """Разбираем дату и возвращаем временные признаки."""
     try:
         dt = datetime.fromisoformat(closed_at)
-        hour       = dt.hour
-        day_of_week= dt.weekday()
-        is_weekend = 1 if dt.weekday() >= 5 else 0
-        is_night   = 1 if (hour >= 22 or hour < 6) else 0
-        is_london  = 1 if 8 <= hour < 12 else 0
-        is_newyork = 1 if 13 <= hour < 18 else 0
-        is_asia    = 1 if (hour >= 0 and hour < 8) else 0
+        hour        = dt.hour
+        day_of_week = dt.weekday()
+        is_weekend  = 1 if day_of_week >= 5 else 0
+        is_night    = 1 if (hour >= 22 or hour < 6) else 0
+        is_london   = 1 if 7 <= hour < 12 else 0
+        is_newyork  = 1 if 13 <= hour < 18 else 0
+        is_asia     = 1 if hour < 7 else 0
+        return hour, day_of_week, is_weekend, is_night, is_london, is_newyork, is_asia
     except Exception:
-        hour = day_of_week = is_weekend = is_night = 0
-        is_london = is_newyork = is_asia = 0
+        return 0, 0, 0, 0, 0, 0, 0
 
-    # Цены
-    entry    = float(trade.get("entry",   trade.get("entry_limit", 0)))
-    stop     = float(trade.get("stop",    0))
-    take     = float(trade.get("take",    0))
-    exit_p   = float(trade.get("exit",    trade.get("exit_price", 0)))
-    pnl      = float(trade.get("pnl",     trade.get("pnl_usd", 0)))
-    result   = trade.get("result", "LOSS")
-    d        = trade.get("dir",    1)
 
-    # Риск-менеджмент признаки
-    risk     = abs(entry - stop)
-    reward   = abs(take  - entry)
+def extract_features(trade, bot_name, deposit, regime_records=None):
+    """
+    Извлекаем признаки из сделки.
+    Поддерживает оба формата журналов:
+      - старый (Bot1 EMA): exit_price, closed_at, vol_ratio, stop, take
+      - новый (Bot2/3/4):  exit, closed, vol, (без stop/take в trades)
+    """
+    # ── Время ──────────────────────────────────────────────────
+    closed_at = trade.get("closed_at") or trade.get("closed", "")
+    hour, dow, is_we, is_night, is_lon, is_ny, is_asia = parse_time(closed_at)
+
+    # ── Цены ───────────────────────────────────────────────────
+    entry  = float(trade.get("entry", trade.get("entry_limit", 0)))
+    stop   = float(trade.get("stop",  0))
+    take   = float(trade.get("take",  0))
+    # exit_price — старый формат, exit — новый
+    exit_p = float(trade.get("exit_price") or trade.get("exit", 0))
+    pnl    = float(trade.get("pnl_usd") or trade.get("pnl", 0))
+    result = trade.get("result", "LOSS")
+    d      = int(trade.get("dir", 1))
+
+    # ── Risk/Reward ─────────────────────────────────────────────
+    if stop > 0 and entry > 0:
+        # Старый формат — есть stop/take
+        risk   = abs(entry - stop)
+        reward = abs(take - entry)
+    else:
+        # Новый формат — считаем из реального PnL
+        # risk_pct = |pnl| / deposit (примерно, т.к. риск фиксирован 5%)
+        risk   = abs(pnl) / deposit * entry if deposit > 0 and entry > 0 else 0
+        # rr берём из конфига бота по типу
+        sig_type = trade.get("type", "")
+        rr_map   = {"MR": 2.0, "FR": 3.0, "BO": 3.0, "EMA": 4.0}
+        rr_guess = next((v for k, v in rr_map.items() if k in sig_type), 3.0)
+        reward   = risk * rr_guess
+
     rr_plan  = round(reward / risk, 2) if risk > 0 else 0
     stop_pct = round(risk / entry * 100, 3) if entry > 0 else 0
     take_pct = round(reward / entry * 100, 3) if entry > 0 else 0
 
-    # Насколько цена дошла до тейка/стопа
-    if d == 1:
-        exit_progress = round((exit_p - entry) / (take - entry) * 100, 1) \
-                        if take != entry else 0
+    # ── Прогресс до TP ──────────────────────────────────────────
+    if take > 0 and entry > 0 and take != entry:
+        if d == 1:
+            exit_progress = round((exit_p - entry) / (take - entry) * 100, 1)
+        else:
+            exit_progress = round((entry - exit_p) / (entry - take) * 100, 1)
     else:
-        exit_progress = round((entry - exit_p) / (entry - take) * 100, 1) \
-                        if take != entry else 0
+        exit_progress = 100.0 if result == "WIN" else -round(1 / rr_plan * 100, 1) if rr_plan > 0 else -33.3
 
-    # Направление
-    direction = "LONG" if d == 1 else "SHORT"
-
-    # Тип сигнала
-    sig_type = trade.get("structure",
-               trade.get("type",
-               trade.get("signal_type", "UNKNOWN")))
-
-    # Таймфрейм в минутах
+    # ── Таймфрейм ───────────────────────────────────────────────
     tf = trade.get("tf", "15m")
     tf_minutes = {"1m":1,"5m":5,"15m":15,"30m":30,
                   "1h":60,"4h":240,"1d":1440}.get(tf, 15)
 
-    # Объём
-    vol_ratio = float(trade.get("vol_ratio",
-                      trade.get("vol",
-                      trade.get("sc_vol_ratio", 0))))
+    # ── Объём ───────────────────────────────────────────────────
+    vol_ratio = float(
+        trade.get("vol_ratio") or   # Bot1 EMA
+        trade.get("vol") or         # Bot2/3/4
+        0
+    )
 
-    # Специфичные признаки по типу стратегии
+    # ── Специфичные признаки ────────────────────────────────────
+    rsi       = float(trade.get("rsi",       0))
+    adx       = float(trade.get("adx",       0))
+    bb_width  = float(trade.get("bb_width",  0))
+    fr        = float(trade.get("fr",        0))   # Funding Rate
+    atr_ratio = float(trade.get("atr_ratio", 0))   # Breakout
+
+    # Wyckoff/SMC (если когда-нибудь вернутся)
     sc_drop    = float(trade.get("sc_drop_pct",   0))
     ar_bounce  = float(trade.get("ar_bounce_pct", 0))
     spring_wick= float(trade.get("spring_wick",   0))
-    fvg_size   = float(trade.get("fvg_size",      0))
-    adx        = float(trade.get("adx",           0))
 
-    # Целевая переменная
-    target = 1 if result == "WIN" else 0
+    # ── Сигнал и направление ────────────────────────────────────
+    sig_type  = trade.get("structure") or trade.get("type") or trade.get("signal_type", "UNKNOWN")
+    direction = "LONG" if d == 1 else "SHORT"
+    target    = 1 if result == "WIN" else 0
+
+    # Режим рынка в момент сделки
+    # Приоритет: поле из журнала → история режимов → неизвестно
+    regime      = trade.get("regime", "?")
+    regime_conf = int(trade.get("regime_conf", 0))
+    if regime == "?" and regime_records:
+        regime, regime_conf = get_regime_at(closed_at, regime_records)
 
     return {
-        # ── Идентификаторы ────────────────────
-        "bot":          bot_name,
-        "symbol":       trade.get("symbol", ""),
-        "tf":           tf,
-        "tf_minutes":   tf_minutes,
-        "direction":    direction,
-        "signal_type":  sig_type,
-        "closed_at":    closed_at,
+        # Идентификаторы
+        "bot":           bot_name,
+        "symbol":        trade.get("symbol", ""),
+        "tf":            tf,
+        "tf_minutes":    tf_minutes,
+        "direction":     direction,
+        "signal_type":   sig_type,
+        "closed_at":     closed_at,
 
-        # ── Цены ──────────────────────────────
-        "entry":        entry,
-        "stop":         stop,
-        "take":         take,
-        "exit_price":   exit_p,
+        # Цены
+        "entry":         round(entry, 6),
+        "stop":          round(stop, 6),
+        "take":          round(take, 6),
+        "exit_price":    round(exit_p, 6),
 
-        # ── Риск-менеджмент ───────────────────
-        "risk_pct":     stop_pct,
-        "reward_pct":   take_pct,
-        "rr_planned":   rr_plan,
-        "exit_progress":exit_progress,
+        # Риск-менеджмент
+        "risk_pct":      stop_pct,
+        "reward_pct":    take_pct,
+        "rr_planned":    rr_plan,
+        "exit_progress": exit_progress,
 
-        # ── Время ─────────────────────────────
-        "hour":         hour,
-        "day_of_week":  day_of_week,
-        "is_weekend":   is_weekend,
-        "is_night":     is_night,
-        "is_london":    is_london,
-        "is_newyork":   is_newyork,
-        "is_asia":      is_asia,
+        # Время
+        "hour":          hour,
+        "day_of_week":   dow,
+        "is_weekend":    is_we,
+        "is_night":      is_night,
+        "is_london":     is_lon,
+        "is_newyork":    is_ny,
+        "is_asia":       is_asia,
 
-        # ── Объём и индикаторы ────────────────
-        "vol_ratio":    vol_ratio,
-        "adx":          adx,
+        # Индикаторы
+        "vol_ratio":     vol_ratio,
+        "rsi":           rsi,
+        "adx":           adx,
+        "bb_width":      bb_width,
+        "funding_rate":  fr,
+        "atr_ratio":     atr_ratio,
 
-        # ── Wyckoff специфика ─────────────────
-        "sc_drop_pct":  sc_drop,
-        "ar_bounce_pct":ar_bounce,
-        "spring_wick":  spring_wick,
+        # Wyckoff/SMC (legacy)
+        "sc_drop_pct":   sc_drop,
+        "ar_bounce_pct": ar_bounce,
+        "spring_wick":   spring_wick,
 
-        # ── SMC специфика ─────────────────────
-        "fvg_size":     fvg_size,
+        # Режим рынка
+        "regime":        regime,
+        "regime_conf":   regime_conf,
 
-        # ── Результат ─────────────────────────
-        "pnl_usd":      pnl,
-        "result":       result,
-        "target":       target,  # 1=WIN, 0=LOSS — это предсказывает ML
+        # Результат
+        "pnl_usd":       round(pnl, 4),
+        "result":        result,
+        "target":        target,
     }
 
 
@@ -185,183 +254,149 @@ def build_dataset():
     summary  = []
 
     print("=" * 60)
-    print(f"  🤖 СБОРЩИК ML ДАТАСЕТА")
+    print(f"  СБОРЩИК ML ДАТАСЕТА")
     print(f"  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
 
-    # Создаём папку ML если не существует
-    try:
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
-        print(f"  Папка: {OUTPUT_DIR} — OK")
-    except Exception as e:
-        print(f"  ОШИБКА создания папки: {e}")
-        print(f"  Файлы будут сохранены в текущую папку")
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    # Загружаем историю режимов рынка
+    regime_records = load_regime_history()
+    if regime_records:
+        print(f"  Загружено записей режима: {len(regime_records)} "
+              f"(с {regime_records[0]['ts'][:10]} по {regime_records[-1]['ts'][:10]})")
+    else:
+        print("  [!] regime_history.jsonl не найден — запусти market_regime.py")
 
     for bot in JOURNALS:
         journal = load_journal(bot)
         if not journal:
-            print(f"\n  ❓ {bot['name']} — журнал не найден")
+            print(f"\n  ? {bot['name']} — журнал не найден ({bot['path']})")
             continue
 
         trades = journal.get("trades", [])
         if not trades:
-            print(f"\n  ⚠️  {bot['name']} — нет сделок")
+            print(f"\n  ! {bot['name']} — нет завершённых сделок")
             continue
 
-        rows = [extract_features(t, bot["name"]) for t in trades]
+        deposit = float(journal.get("deposit", INITIAL_DEPOSIT))
+        rows = [extract_features(t, bot["name"], deposit, regime_records) for t in trades]
         all_rows.extend(rows)
 
         wins = sum(1 for r in rows if r["target"] == 1)
-        wr   = round(wins / len(rows) * 100, 1) if rows else 0
+        wr   = round(wins / len(rows) * 100, 1)
 
-        print(f"\n  ✅ {bot['name']}: {len(rows)} сделок  WR={wr}%")
-
-        # Статистика по признакам
+        print(f"\n  OK {bot['name']}: {len(rows)} сделок  WR={wr}%")
         df_bot = pd.DataFrame(rows)
         print(f"     Лонгов: {(df_bot['direction']=='LONG').sum()}  "
               f"Шортов: {(df_bot['direction']=='SHORT').sum()}")
-        print(f"     Ср. объём: {df_bot['vol_ratio'].mean():.2f}x")
-        print(f"     Ср. стоп: {df_bot['risk_pct'].mean():.3f}%")
-        print(f"     Ср. RR: {df_bot['rr_planned'].mean():.2f}")
+        print(f"     Ср. объём: {df_bot['vol_ratio'].mean():.2f}x  "
+              f"Ср. стоп: {df_bot['risk_pct'].mean():.3f}%")
 
-        # Корреляция признаков с результатом
-        numeric_cols = ["vol_ratio","risk_pct","rr_planned",
-                        "hour","tf_minutes","exit_progress"]
-        print(f"     Корреляция с WIN:")
-        for col in numeric_cols:
-            if df_bot[col].std() > 0:
-                corr = df_bot[col].corr(df_bot["target"])
-                bar  = "▓" * int(abs(corr) * 20) if not (corr != corr) else ""
-                sign = "+" if corr > 0 else "-"
-                print(f"       {col:<20} {sign}{abs(corr):.3f}  {bar}")
-
-        summary.append({
-            "bot":    bot["name"],
-            "trades": len(rows),
-            "wins":   wins,
-            "wr":     wr,
-        })
+        summary.append({"bot": bot["name"], "trades": len(rows), "wins": wins, "wr": wr})
 
     if not all_rows:
         print("\n[!] Нет данных для датасета")
+        input("Enter...")
         return
 
     df = pd.DataFrame(all_rows)
-
-    # ── Итоговая статистика ───────────────────
-    total_wins = df["target"].sum()
-    total_wr   = round(total_wins / len(df) * 100, 1)
+    total_wr = round(df["target"].mean() * 100, 1)
 
     print(f"\n{'='*60}")
     print(f"  ИТОГО: {len(df)} сделок  WR={total_wr}%")
     print(f"{'='*60}")
 
-    # Топ признаков по корреляции с результатом
-    print(f"\n  📊 ТОП ПРИЗНАКОВ (корреляция с WIN):")
-    numeric = df.select_dtypes(include=[np.number]).columns.tolist()
-    numeric = [c for c in numeric if c not in
-               ["target","entry","stop","take","exit_price","pnl_usd"]]
+    # ── Топ признаков ─────────────────────────────────────────
+    print(f"\n  ТОП ПРИЗНАКОВ (корреляция с WIN):")
+    skip = {"target","entry","stop","take","exit_price","pnl_usd","exit_progress"}
+    numeric = [c for c in df.select_dtypes(include=[np.number]).columns if c not in skip]
     corrs = []
     for col in numeric:
         if df[col].std() > 0:
-            corr = df[col].corr(df["target"])
-            if corr == corr:  # проверка на NaN
-                corrs.append((col, corr))
+            c = df[col].corr(df["target"])
+            if not np.isnan(c):
+                corrs.append((col, c))
     corrs.sort(key=lambda x: abs(x[1]), reverse=True)
-    for col, corr in corrs[:10]:
-        bar  = "▓" * int(abs(corr) * 30) if not (corr != corr) else ""
-        sign = "+" if corr > 0 else "-"
-        print(f"  {col:<22} {sign}{abs(corr):.3f}  {bar}")
+    for col, c in corrs[:10]:
+        bar  = "█" * int(abs(c) * 30)
+        sign = "+" if c > 0 else "-"
+        print(f"  {col:<22} {sign}{abs(c):.3f}  {bar}")
 
-    print(f"\n  💡 Интерпретация:")
-    for col, corr in corrs[:3]:
-        if corr > 0.05:
-            print(f"     Чем выше {col} → тем выше вероятность WIN")
-        elif corr < -0.05:
-            print(f"     Чем выше {col} → тем выше вероятность LOSS")
-
-    # ── Анализ по времени ─────────────────────
-    print(f"\n  🕐 WIN RATE ПО ВРЕМЕНИ СУТОК:")
+    # ── По времени ────────────────────────────────────────────
+    print(f"\n  WR ПО ВРЕМЕНИ СУТОК:")
     for h in [0, 4, 8, 12, 16, 20]:
-        mask = (df["hour"] >= h) & (df["hour"] < h+4)
-        grp  = df[mask]
+        grp = df[(df["hour"] >= h) & (df["hour"] < h+4)]
         if len(grp) > 0:
             wr_h = round(grp["target"].mean() * 100, 1)
-            bar  = "▓" * int(wr_h / 5) if wr_h == wr_h else ""
-            print(f"  {h:02d}-{h+4:02d}ч: {wr_h:>5}%  {bar}  ({len(grp)} сделок)")
+            bar  = "█" * int(wr_h / 5)
+            print(f"  {h:02d}-{h+4:02d}ч: {wr_h:>5}%  {bar}  ({len(grp)} сд)")
 
-    # ── Анализ по таймфрейму ──────────────────
-    print(f"\n  📈 WIN RATE ПО ТАЙМФРЕЙМУ:")
-    for tf in sorted(df["tf"].unique()):
-        grp = df[df["tf"] == tf]
-        wr_tf = round(grp["target"].mean() * 100, 1)
-        bar   = "▓" * int(wr_tf / 5) if wr_tf == wr_tf else ""
-        print(f"  {tf:<6}: {wr_tf:>5}%  {bar}  ({len(grp)} сделок)")
+    # ── По боту ───────────────────────────────────────────────
+    print(f"\n  WR ПО БОТУ:")
+    for bot_name in df["bot"].unique():
+        grp = df[df["bot"] == bot_name]
+        wr_b = round(grp["target"].mean() * 100, 1)
+        bar  = "█" * int(wr_b / 5)
+        print(f"  {bot_name:<12} {wr_b:>5}%  {bar}  ({len(grp)} сд)")
 
-    # ── Анализ по направлению ─────────────────
-    print(f"\n  📊 WIN RATE ЛОНГ vs ШОРТ:")
+    # ── По направлению ────────────────────────────────────────
+    print(f"\n  WR ЛОНГ vs ШОРТ:")
     for d in ["LONG", "SHORT"]:
         grp = df[df["direction"] == d]
         if len(grp) > 0:
             wr_d = round(grp["target"].mean() * 100, 1)
-            bar  = "▓" * int(wr_d / 5) if wr_d == wr_d else ""
-            print(f"  {d:<6}: {wr_d:>5}%  {bar}  ({len(grp)} сделок)")
+            bar  = "█" * int(wr_d / 5)
+            print(f"  {d:<6} {wr_d:>5}%  {bar}  ({len(grp)} сд)")
 
-    # ── Анализ по объёму ──────────────────────
-    print(f"\n  📊 WIN RATE ПО ОБЪЁМУ:")
-    bins = [0, 1.5, 2.0, 3.0, 5.0, 100]
-    labels = ["<1.5x", "1.5-2x", "2-3x", "3-5x", ">5x"]
-    df["vol_bin"] = pd.cut(df["vol_ratio"], bins=bins, labels=labels)
-    for label in labels:
+    # ── По объёму ─────────────────────────────────────────────
+    print(f"\n  WR ПО ОБЪЁМУ:")
+    df["vol_bin"] = pd.cut(df["vol_ratio"],
+                           bins=[0,1.5,2.0,3.0,5.0,100],
+                           labels=["<1.5x","1.5-2x","2-3x","3-5x",">5x"])
+    for label in ["<1.5x","1.5-2x","2-3x","3-5x",">5x"]:
         grp = df[df["vol_bin"] == label]
         if len(grp) > 0:
             wr_v = round(grp["target"].mean() * 100, 1)
-            bar  = "▓" * int(wr_v / 5) if wr_v == wr_v else ""
-            print(f"  {label:<8}: {wr_v:>5}%  {bar}  ({len(grp)} сделок)")
+            bar  = "█" * int(wr_v / 5)
+            print(f"  {label:<8} {wr_v:>5}%  {bar}  ({len(grp)} сд)")
 
-    # ── Сохраняем файлы ───────────────────────
-    # Сохраняем CSV
-    for save_dir in [OUTPUT_DIR, os.getcwd(), "."]:
+    # ── Сохраняем ─────────────────────────────────────────────
+    for save_dir in [OUTPUT_DIR, os.getcwd()]:
         try:
             os.makedirs(save_dir, exist_ok=True)
             csv_path = os.path.join(save_dir, "ml_dataset.csv")
             df.to_csv(csv_path, index=False, encoding="utf-8")
-            print(f"\n[+] ML датасет: {csv_path}")
+            print(f"\n[+] Датасет: {csv_path}")
             break
         except Exception as e:
-            print(f"  Не удалось сохранить в {save_dir}: {e}")
-            continue
+            print(f"  Ошибка сохранения в {save_dir}: {e}")
 
     # Текстовый отчёт
-    report = []
-    report.append(f"ML ДАТАСЕТ  |  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    report.append(f"Всего сделок: {len(df)}  WR: {total_wr}%")
-    report.append("")
+    report = [
+        f"ML ДАТАСЕТ  |  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"Всего сделок: {len(df)}  WR: {total_wr}%",
+        "",
+    ]
     for s in summary:
         report.append(f"{s['bot']:<12}: {s['trades']:>4} сделок  WR={s['wr']}%")
-    report.append("")
-    report.append("ТОП ПРИЗНАКОВ:")
-    for col, corr in corrs[:10]:
-        report.append(f"  {col:<22} {corr:>+.3f}")
-    report.append("")
-    report.append("ПОЛНЫЕ ДАННЫЕ: ml_dataset.csv")
+    report += ["", "ТОП ПРИЗНАКОВ:"]
+    for col, c in corrs[:10]:
+        report.append(f"  {col:<22} {c:>+.3f}")
+    report += ["", "ПОЛНЫЕ ДАННЫЕ: ml_dataset.csv"]
 
-    for save_dir in [OUTPUT_DIR, os.getcwd(), "."]:
+    for save_dir in [OUTPUT_DIR, os.getcwd()]:
         try:
             txt_path = os.path.join(save_dir, "ml_dataset_summary.txt")
             with open(txt_path, "w", encoding="utf-8") as f:
                 f.write("\n".join(report))
-            print(f"[+] Сводка:    {txt_path}")
+            print(f"[+] Сводка:  {txt_path}")
             break
-        except Exception as e:
-            print(f"  Не удалось сохранить сводку в {save_dir}: {e}")
-            continue
+        except Exception:
+            pass
 
-    print(f"\n  📤 Загрузи ml_dataset_summary.txt в чат для анализа!")
-    print(f"  📤 ml_dataset.csv — для обучения ML модели")
-    print(f"\n  Нужно минимум 200-300 сделок для ML.")
-    print(f"  Сейчас: {len(df)} сделок — продолжаем собирать!\n")
-
+    print(f"\n  Загрузи ml_dataset_summary.txt в чат для анализа!")
+    print(f"  Минимум для ML: 200+ сделок. Сейчас: {len(df)} сделок.\n")
     input("Нажми Enter для выхода...")
 
 
@@ -372,4 +407,4 @@ if __name__ == "__main__":
         import traceback
         print(f"\nОШИБКА: {e}")
         print(traceback.format_exc())
-        input("\nНажми Enter для выхода...")
+        input("\nНажми Enter...")

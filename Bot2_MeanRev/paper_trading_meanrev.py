@@ -311,6 +311,8 @@ def run_cycle(ex, journal, cfg):
                 "rsi": pos.get("rsi",0), "adx": pos.get("adx",0),
                 "bb_width": pos.get("bb_width",0),
                 "vol": pos.get("vol",0),
+                "regime": pos.get("regime", "?"),
+                "regime_conf": pos.get("regime_conf", 0),
                 "pnl": round(pnl,4), "result": result,
                 "balance": round(balance,4), "closed": now,
             })
@@ -354,6 +356,16 @@ def run_cycle(ex, journal, cfg):
             sig = sigs[0]
             key = f"{sym}_{sig['dir']}"
             if key in existing: continue
+            # Читаем текущий режим рынка
+            regime_info = {}
+            try:
+                import json as _json
+                with open("C:\\TradingBots\\shared_state.json") as _f:
+                    _s = _json.load(_f)
+                regime_info = {"regime": _s.get("regime","?"), "regime_conf": _s.get("confidence",0)}
+            except Exception:
+                pass
+
             journal["pending"].append({
                 "symbol": sym, "tf": tf,
                 "dir": sig["dir"], "entry": sig["entry"],
@@ -361,6 +373,8 @@ def run_cycle(ex, journal, cfg):
                 "type": sig["type"], "rsi": sig["rsi"],
                 "adx": sig["adx"], "bb_width": sig["bb_width"],
                 "vol": sig["vol"], "rr": sig["rr"],
+                "regime": regime_info.get("regime", "?"),
+                "regime_conf": regime_info.get("regime_conf", 0),
                 "added": now, "waited": 0,
             })
             existing.add(key)

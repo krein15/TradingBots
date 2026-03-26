@@ -351,7 +351,8 @@ def run_cycle(exchange, journal, cfg):
         p["bars_waited"] = p.get("bars_waited", 0) + 1
         entry   = p["entry_limit"]
         d       = p["dir"]
-        filled  = (entry * 0.997 <= price <= entry * 1.003)  # цена в зоне ±0.3% от входа
+        filled  = (d == 1 and price <= entry * 1.005) or \
+                  (d == -1 and price >= entry * 0.995)
         expired = p["bars_waited"] >= cfg["max_wait_bars"]
 
         if filled:
@@ -527,6 +528,17 @@ def run_cycle(exchange, journal, cfg):
                 if last_vol < 1.2:
                     continue  # объём слабый — пропускаем
 
+                # Читаем текущий режим рынка
+                _regime, _rconf = "?", 0
+                try:
+                    import json as _j
+                    with open("C:\\TradingBots\\shared_state.json") as _f:
+                        _s = _j.load(_f)
+                    _regime = _s.get("regime", "?")
+                    _rconf  = _s.get("confidence", 0)
+                except Exception:
+                    pass
+
                 pending_sig = {
                     "symbol":      sym, "tf": tf, "dir": d,
                     "entry_limit": entry,
@@ -535,6 +547,8 @@ def run_cycle(exchange, journal, cfg):
                     "chg_pct":     sig["chg_pct"],
                     "vol_ratio":   sig["vol_ratio"],
                     "btc_trend":   btc_trend,
+                    "regime":      _regime,
+                    "regime_conf": _rconf,
                     "added_at":    now,
                     "bars_waited": 0,
                 }

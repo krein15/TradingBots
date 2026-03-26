@@ -1,0 +1,21 @@
+{
+  "regime": "SIDEWAYS",
+  "confidence": 75,
+  "recommended_bot": "Bot2_MeanRev",
+  "description": "возврат к среднему",
+  "updated_at": "2026-03-26T10:20:02.396073",
+  "details": {
+    "adx": 23.0,
+    "plus_di": 12.0,
+    "minus_di": 28.4,
+    "atr_ratio": 0.8,
+    "bb_width": 0.0094,
+    "bb_avg": 0.012,
+    "bb_squeeze": true,
+    "bb_expansion": false,
+    "ema20": 70990.24,
+    "ema50": 70748.99,
+    "close": 70569.21,
+    "volatility": 0.529
+  }
+}
