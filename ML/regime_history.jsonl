@@ -7,3 +7,7 @@
 {"ts": "2026-03-26T12:25:46.895410", "regime": "TREND_DOWN", "confidence": 67, "adx": 33.9, "atr_ratio": 0.84, "bb_width": 0.0134, "plus_di": 9.0, "minus_di": 34.8, "btc_close": 70035.61, "ema50": 70677.89}
 {"ts": "2026-03-26T12:55:47.656147", "regime": "TREND_DOWN", "confidence": 68, "adx": 34.3, "atr_ratio": 0.87, "bb_width": 0.0131, "plus_di": 8.3, "minus_di": 35.3, "btc_close": 70145.41, "ema50": 70682.19}
 {"ts": "2026-03-26T14:11:24.875620", "regime": "SIDEWAYS", "confidence": 50, "adx": null, "atr_ratio": null, "bb_width": null, "plus_di": null, "minus_di": null, "btc_close": null, "ema50": null}
+{"ts": "2026-03-26T14:45:02.195606", "regime": "TREND_DOWN", "confidence": 85, "adx": 42.5, "atr_ratio": 0.93, "bb_width": 0.0153, "plus_di": 5.9, "minus_di": 36.1, "btc_close": 69506.64, "ema50": 70605.82}
+{"ts": "2026-03-26T15:15:03.116693", "regime": "TREND_DOWN", "confidence": 93, "adx": 46.6, "atr_ratio": 0.85, "bb_width": 0.0165, "plus_di": 5.6, "minus_di": 34.9, "btc_close": 69582.64, "ema50": 70563.32}
+{"ts": "2026-03-26T15:45:03.867117", "regime": "TREND_DOWN", "confidence": 93, "adx": 46.6, "atr_ratio": 0.88, "bb_width": 0.0167, "plus_di": 5.4, "minus_di": 33.9, "btc_close": 69537.07, "ema50": 70561.53}
+{"ts": "2026-03-26T16:15:04.637913", "regime": "TREND_DOWN", "confidence": 100, "adx": 50.1, "atr_ratio": 0.84, "bb_width": 0.0181, "plus_di": 5.0, "minus_di": 32.0, "btc_close": 69570.4, "ema50": 70519.83}

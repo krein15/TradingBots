@@ -68,7 +68,7 @@ CONFIG = {
     "commission":       0.001,
     "stop_buffer":      0.001,
     "min_stop_pct":     0.002,           # стоп <0.2% — слишком плотный, выбивается шумом
-    "max_stop_pct":     0.005,           # стоп >0.5% — WR резко падает (данные 314 сд)
+    "max_stop_pct":     0.008,           # стоп >0.8% — фильтруем (0.5% было слишком жёстко в тренде)
     "bad_hours":        [14, 21, 22],    # WR 7-9% — систематически плохие часы UTC
     "max_wait_bars":    10,
     "btc_ema_period":   50,
@@ -351,7 +351,8 @@ def run_cycle(exchange, journal, cfg):
         p["bars_waited"] = p.get("bars_waited", 0) + 1
         entry   = p["entry_limit"]
         d       = p["dir"]
-        filled  = (entry * 0.997 <= price <= entry * 1.003)  # ±0.3% от входа
+        filled  = (d == 1 and price <= entry * 1.005) or \
+                  (d == -1 and price >= entry * 0.995)
         expired = p["bars_waited"] >= cfg["max_wait_bars"]
 
         if filled:
@@ -494,10 +495,15 @@ def run_cycle(exchange, journal, cfg):
                 # Фильтр: не берём лонг если монета на 1ч падает
                 #         не берём шорт если монета на 1ч растёт
                 effective_trend = btc_trend
-                if btc_trend == "bull" and coin_trend == "bear":
-                    continue  # BTC растёт но монета падает — пропускаем
-                if btc_trend == "bear" and coin_trend == "bull":
-                    continue  # BTC падает но монета растёт — пропускаем
+                # В сильном тренде (ADX>35) не фильтруем по coin_trend —
+                # монеты разворачиваются с задержкой, это лучшие входы
+                btc_adx = df.iloc[-1].get("adx", 0) if "adx" in df.columns else 0
+                strong_trend = True  # Bot1 работает только в TREND режиме
+                if not strong_trend:
+                    if btc_trend == "bull" and coin_trend == "bear":
+                        continue
+                    if btc_trend == "bear" and coin_trend == "bull":
+                        continue
 
                 sigs = find_signals(df, cfg, effective_trend, btc_chg)
                 recent = [s for s in sigs if s["bar"] >= len(df) - 3]
