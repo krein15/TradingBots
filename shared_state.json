@@ -3,7 +3,7 @@
   "confidence": 75,
   "recommended_bot": "Bot2_MeanRev",
   "description": "возврат к среднему",
-  "updated_at": "2026-03-26T10:20:02.396073",
+  "updated_at": "2026-03-26T10:25:42.585585",
   "details": {
     "adx": 23.0,
     "plus_di": 12.0,
@@ -13,9 +13,9 @@
     "bb_avg": 0.012,
     "bb_squeeze": true,
     "bb_expansion": false,
-    "ema20": 70990.24,
-    "ema50": 70748.99,
-    "close": 70569.21,
+    "ema20": 70989.46,
+    "ema50": 70748.67,
+    "close": 70561.06,
     "volatility": 0.529
   }
 }
