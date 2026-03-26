@@ -31,10 +31,10 @@ CONFIG = {
     "rsi_period":       14,
     "bb_period":        20,
     "bb_std":           2.0,
-    "rsi_oversold":     30,
-    "rsi_overbought":   70,
+    "rsi_oversold":     35,        # смягчено с 30 — в боковике RSI редко до 30
+    "rsi_overbought":   65,        # смягчено с 70
     "adx_period":       14,
-    "adx_max":          25,        # торгуем только в боковике
+    "adx_max":          28,        # смягчено с 25 — ловим больше боковиков
     "max_vol_mult":     3.0,       # исключаем новостные движения
     "min_usdt_vol":     1_000_000,
     "rr":               2.0,       # RR 1:2 (тейк = средняя BB)
@@ -191,7 +191,7 @@ def find_signals(df, cfg):
     # ЛОНГ: RSI перепродан + цена у нижней BB
     if ind["rsi"] <= cfg["rsi_oversold"]:
         # Цена должна быть ОКОЛО нижней BB — не выше на 0.3%
-        near_dn = ind["bb_dn"] * 0.997 <= close_now <= ind["bb_dn"] * 1.003
+        near_dn = ind["bb_dn"] * 0.990 <= close_now <= ind["bb_dn"] * 1.010  # зона ±1%
         if near_dn:
             entry = close_now
             stop  = ind["bb_dn"] * (1 - buf)
@@ -217,7 +217,7 @@ def find_signals(df, cfg):
     # ШОРТ: RSI перекуплен + цена у верхней BB
     if ind["rsi"] >= cfg["rsi_overbought"]:
         # Цена должна быть ОКОЛО верхней BB — не ниже на 0.3%
-        near_up = ind["bb_up"] * 0.997 <= close_now <= ind["bb_up"] * 1.003
+        near_up = ind["bb_up"] * 0.990 <= close_now <= ind["bb_up"] * 1.010  # зона ±1%
         if near_up:
             entry = close_now
             stop  = ind["bb_up"] * (1 + buf)

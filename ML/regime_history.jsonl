@@ -1,3 +1,5 @@
 {"ts": "2026-03-26T10:18:38.335568", "regime": "SIDEWAYS", "confidence": 75, "adx": 23.0, "atr_ratio": 0.8, "bb_width": 0.0094, "plus_di": 12.0, "minus_di": 28.4, "btc_close": 70549.91, "ema50": 70748.24}
 {"ts": "2026-03-26T10:20:02.396073", "regime": "SIDEWAYS", "confidence": 75, "adx": 23.0, "atr_ratio": 0.8, "bb_width": 0.0094, "plus_di": 12.0, "minus_di": 28.4, "btc_close": 70569.21, "ema50": 70748.99}
 {"ts": "2026-03-26T10:25:42.585585", "regime": "SIDEWAYS", "confidence": 75, "adx": 23.0, "atr_ratio": 0.8, "bb_width": 0.0094, "plus_di": 12.0, "minus_di": 28.4, "btc_close": 70561.06, "ema50": 70748.67}
+{"ts": "2026-03-26T10:55:43.376376", "regime": "SIDEWAYS", "confidence": 50, "adx": 25.3, "atr_ratio": 0.93, "bb_width": 0.0114, "plus_di": 10.2, "minus_di": 38.8, "btc_close": 69989.13, "ema50": 70726.25}
+{"ts": "2026-03-26T11:25:44.358521", "regime": "TREND_DOWN", "confidence": 60, "adx": 30.0, "atr_ratio": 0.88, "bb_width": 0.0131, "plus_di": 9.4, "minus_di": 38.1, "btc_close": 69953.09, "ema50": 70698.11}

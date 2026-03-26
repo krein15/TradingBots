@@ -351,8 +351,7 @@ def run_cycle(exchange, journal, cfg):
         p["bars_waited"] = p.get("bars_waited", 0) + 1
         entry   = p["entry_limit"]
         d       = p["dir"]
-        filled  = (d == 1 and price <= entry * 1.005) or \
-                  (d == -1 and price >= entry * 0.995)
+        filled  = (entry * 0.997 <= price <= entry * 1.003)  # ±0.3% от входа
         expired = p["bars_waited"] >= cfg["max_wait_bars"]
 
         if filled:
