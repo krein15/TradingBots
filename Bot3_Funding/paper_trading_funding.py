@@ -256,8 +256,9 @@ def run_cycle(ex, journal, cfg):
         # Лимитный ордер: цена должна быть близко к уровню входа
         # Funding Rate — входим по рынку при первом цикле
         # Цена FR сигнала = текущая цена, поэтому ±1% допуск
-        hit = (d == 1 and entry * 0.990 <= price <= entry * 1.010) or \
-              (d == -1 and entry * 0.990 <= price <= entry * 1.010)
+        # Лимитный ордер ±0.3% от уровня входа
+        # Если цена ушла дальше — ждём возврата или отменяем по max_wait
+        hit = (entry * 0.997 <= price <= entry * 1.003)
         if hit:
             risk = abs(entry - p["stop"])
             qty  = (balance * cfg["risk_pct"]) / risk if risk > 0 else 0
@@ -298,8 +299,6 @@ def run_cycle(ex, journal, cfg):
                 "fr": pos.get("fr", 0),
                 "rsi": pos.get("rsi", 0),
                 "vol": pos.get("vol", 0),
-                "regime": pos.get("regime", "?"),
-                "regime_conf": pos.get("regime_conf", 0),
                 "pnl": round(pnl,4), "result": result,
                 "balance": round(balance,4), "closed": now,
             })
@@ -368,24 +367,13 @@ def run_cycle(ex, journal, cfg):
         if key in existing:
             continue
 
-        _regime, _rconf = "?", 0
-        try:
-            import json as _j
-            with open("C:\\TradingBots\\shared_state.json") as _f:
-                _s = _j.load(_f)
-            _regime, _rconf = _s.get("regime","?"), _s.get("confidence",0)
-        except Exception:
-            pass
-
         journal["pending"].append({
             "symbol": sym, "tf": "1h",
             "dir": sig["dir"], "entry": sig["entry"],
             "stop": sig["stop"], "take": sig["take"],
             "type": sig["type"], "fr": sig["fr"],
             "rsi": sig["rsi"], "vol": sig["vol"],
-            "rr": sig["rr"],
-            "regime": _regime, "regime_conf": _rconf,
-            "added": now, "waited": 0,
+            "rr": sig["rr"], "added": now, "waited": 0,
         })
         existing.add(key)
         open_cnt += 1

@@ -31,13 +31,14 @@ CONFIG = {
     "rsi_period":       14,
     "bb_period":        20,
     "bb_std":           2.0,
-    "rsi_oversold":     35,        # смягчено с 30 — в боковике RSI редко до 30
-    "rsi_overbought":   65,        # смягчено с 70
+    "rsi_oversold":     30,
+    "rsi_overbought":   70,
     "adx_period":       14,
-    "adx_max":          28,        # смягчено с 25 — ловим больше боковиков
+    "adx_max":          25,        # торгуем только в боковике
     "max_vol_mult":     3.0,       # исключаем новостные движения
     "min_usdt_vol":     1_000_000,
     "rr":               2.0,       # RR 1:2 (тейк = средняя BB)
+    "min_rr":           1.5,       # минимальный RR — отсекаем мусорные сигналы
     "commission":       0.001,
     "buf":              0.005,   # увеличен — стоп дальше от цены
     "max_wait":         8,
@@ -118,6 +119,27 @@ def get_price(ex, symbol):
         return None
 
 
+def get_btc_trend(ex, cfg):
+    """
+    Тренд BTC по EMA50 на 1h.
+    Возвращает: "bull" | "bear" | "neutral"
+    Используется для фильтрации шортов MeanRev:
+    не шортим если BTC в медвежьем тренде — шорты MR убыточны в тренде.
+    """
+    try:
+        df = fetch_df(ex, "BTC/USDT", "1h", 60, cfg)
+        if df is None:
+            return "neutral"
+        ema = df["close"].ewm(span=50, adjust=False).mean()
+        lc  = df["close"].iloc[-1]
+        le  = ema.iloc[-1]
+        if lc > le * 1.005: return "bull"
+        if lc < le * 0.995: return "bear"
+        return "neutral"
+    except Exception:
+        return "neutral"
+
+
 def calc_indicators(df, cfg):
     """RSI + Bollinger Bands + ADX"""
     close = df["close"]
@@ -191,7 +213,7 @@ def find_signals(df, cfg):
     # ЛОНГ: RSI перепродан + цена у нижней BB
     if ind["rsi"] <= cfg["rsi_oversold"]:
         # Цена должна быть ОКОЛО нижней BB — не выше на 0.3%
-        near_dn = ind["bb_dn"] * 0.990 <= close_now <= ind["bb_dn"] * 1.010  # зона ±1%
+        near_dn = ind["bb_dn"] * 0.997 <= close_now <= ind["bb_dn"] * 1.003
         if near_dn:
             entry = close_now
             stop  = ind["bb_dn"] * (1 - buf)
@@ -201,6 +223,9 @@ def find_signals(df, cfg):
             take  = ind["bb_mid"]  # тейк = средняя BB
             if take <= entry:
                 return signals
+            rr_actual = round((take - entry) / risk, 2)
+            if rr_actual < cfg.get("min_rr", 0):
+                return signals  # RR слишком маленький — тейк ближе стопа
             signals.append({
                 "dir":      1,
                 "entry":    round(entry, 6),
@@ -211,13 +236,13 @@ def find_signals(df, cfg):
                 "adx":      ind["adx"],
                 "bb_width": ind["bb_width"],
                 "vol":      round(vol_now, 2),
-                "rr":       round((take - entry) / risk, 2),
+                "rr":       rr_actual,
             })
 
     # ШОРТ: RSI перекуплен + цена у верхней BB
     if ind["rsi"] >= cfg["rsi_overbought"]:
         # Цена должна быть ОКОЛО верхней BB — не ниже на 0.3%
-        near_up = ind["bb_up"] * 0.990 <= close_now <= ind["bb_up"] * 1.010  # зона ±1%
+        near_up = ind["bb_up"] * 0.997 <= close_now <= ind["bb_up"] * 1.003
         if near_up:
             entry = close_now
             stop  = ind["bb_up"] * (1 + buf)
@@ -227,6 +252,9 @@ def find_signals(df, cfg):
             take  = ind["bb_mid"]
             if take >= entry:
                 return signals
+            rr_actual = round((entry - take) / risk, 2)
+            if rr_actual < cfg.get("min_rr", 0):
+                return signals  # RR слишком маленький
             signals.append({
                 "dir":      -1,
                 "entry":    round(entry, 6),
@@ -237,7 +265,7 @@ def find_signals(df, cfg):
                 "adx":      ind["adx"],
                 "bb_width": ind["bb_width"],
                 "vol":      round(vol_now, 2),
-                "rr":       round((entry - take) / risk, 2),
+                "rr":       rr_actual,
             })
 
     return signals
@@ -343,6 +371,10 @@ def run_cycle(ex, journal, cfg):
     symbols  = get_symbols(ex, cfg["min_usdt_vol"])
     new_sigs = 0
 
+    # BTC тренд — фильтруем шорты в медвежьем рынке
+    btc_trend = get_btc_trend(ex, cfg)
+    log(f"BTC тренд: {btc_trend}  (шорты MR {'заблокированы' if btc_trend == 'bear' else 'разрешены'})", cfg, show=True)
+
     for tf in cfg["timeframes"]:
         if open_cnt >= cfg["max_trades"]: break
         for sym in symbols[:100]:
@@ -354,6 +386,12 @@ def run_cycle(ex, journal, cfg):
             sigs = find_signals(df, cfg)
             if not sigs: continue
             sig = sigs[0]
+
+            # BTC тренд фильтр для шортов:
+            # MeanRev шорты против медвежьего тренда убыточны (RR реальный 0.47)
+            if sig["dir"] == -1 and btc_trend == "bear":
+                continue  # не шортим в медвежьем рынке — цена продолжает падать
+
             key = f"{sym}_{sig['dir']}"
             if key in existing: continue
             # Читаем текущий режим рынка
