@@ -61,14 +61,15 @@ CONFIG = {
     "min_price_chg":    0.003,       # 0.3% — для вялого рынка — ловим слабые импульсы
     "min_vol_mult":     1.2,          # снижено до 1.2x
     "vol_avg_period":   20,
-    "fibo_entry":       0.236,       # изменено с 38.2% на 23.6% — ближе к цене
+    "fibo_entry":       0.236,       # SIDEWAYS — откат 23.6% (классика)
+    "fibo_trend":       0.05,        # TREND — вход почти сразу 5% от импульса
     "max_entry_miss":   0.05,        # увеличено до 5% — брать сигнал даже если цена ушла
     "min_usdt_vol":     1_000_000,
     "rr_ratio":          4.0,
     "commission":       0.001,
     "stop_buffer":      0.001,
     "min_stop_pct":     0.002,           # стоп <0.2% — слишком плотный, выбивается шумом
-    "max_stop_pct":     0.008,           # стоп >0.8% — фильтруем (0.5% было слишком жёстко в тренде)
+    "max_stop_pct":     0.004,           # стоп >0.4% — WR=0% на данных (0.4-0.5% убыточны)
     "bad_hours":        [14, 21, 22],    # WR 7-9% — систематически плохие часы UTC
     "max_wait_bars":    10,
     "btc_ema_period":   50,
@@ -225,6 +226,25 @@ def add_indicators(df, cfg):
     return df
 
 
+def read_market_regime():
+    """
+    Читаем текущий режим из shared_state.json.
+    SIDEWAYS / ?  → fibo_entry 23.6%
+    TREND_*       → fibo_trend  5%
+    """
+    try:
+        import json as _j
+        with open("C:\\TradingBots\\shared_state.json") as f:
+            s = _j.load(f)
+        from datetime import datetime as _dt
+        updated = _dt.fromisoformat(s.get("updated_at", "2000-01-01"))
+        if (_dt.now() - updated).total_seconds() / 60 > 90:
+            return "?", 0  # данные устарели
+        return s.get("regime", "?"), s.get("confidence", 0)
+    except Exception:
+        return "?", 0
+
+
 def get_coin_trend(df_1h):
     """Проверяем тренд монеты на 1ч — не берём лонг если монета падает"""
     if df_1h is None or len(df_1h) < 20:
@@ -234,7 +254,7 @@ def get_coin_trend(df_1h):
     return "bull" if close.iloc[-1] > ema20.iloc[-1] else "bear"
 
 
-def find_signals(df, cfg, btc_trend="neutral", btc_chg=0.0):
+def find_signals(df, cfg, btc_trend="neutral", btc_chg=0.0, market_regime="?"):
     """
     btc_chg — изменение BTC за последние N свечей.
     Логика подтверждения:
@@ -244,7 +264,9 @@ def find_signals(df, cfg, btc_trend="neutral", btc_chg=0.0):
     """
     min_chg = cfg["min_price_chg"]
     min_vol = cfg["min_vol_mult"]
-    fibo    = cfg["fibo_entry"]
+    # Выбираем Фибо по режиму рынка
+    is_trend = market_regime in ("TREND_UP", "TREND_DOWN")
+    fibo     = cfg.get("fibo_trend", 0.05) if is_trend else cfg["fibo_entry"]
     buf     = cfg["stop_buffer"]
     rr      = cfg["rr_ratio"]
     start   = cfg["impulse_candles"] + cfg["vol_avg_period"]
@@ -466,6 +488,12 @@ def run_cycle(exchange, journal, cfg):
         except Exception:
             symbols = []
 
+        # Читаем режим рынка — определяет точку входа по Фибо
+        market_regime, regime_conf = read_market_regime()
+        is_trend  = market_regime in ("TREND_UP", "TREND_DOWN")
+        fibo_used = cfg.get("fibo_trend", 0.05) if is_trend else cfg["fibo_entry"]
+        log(f"📊 Режим: {market_regime} ({regime_conf}%)  Фибо: {fibo_used:.1%}", cfg, show=True)
+
         for tf in cfg["timeframes"]:
             if open_count >= cfg["max_open_trades"]:
                 break
@@ -505,7 +533,7 @@ def run_cycle(exchange, journal, cfg):
                     if btc_trend == "bear" and coin_trend == "bull":
                         continue
 
-                sigs = find_signals(df, cfg, effective_trend, btc_chg)
+                sigs = find_signals(df, cfg, effective_trend, btc_chg, market_regime)
                 recent = [s for s in sigs if s["bar"] >= len(df) - 3]
                 if not recent:
                     continue
@@ -533,17 +561,6 @@ def run_cycle(exchange, journal, cfg):
                 if last_vol < 1.2:
                     continue  # объём слабый — пропускаем
 
-                # Читаем текущий режим рынка
-                _regime, _rconf = "?", 0
-                try:
-                    import json as _j
-                    with open("C:\\TradingBots\\shared_state.json") as _f:
-                        _s = _j.load(_f)
-                    _regime = _s.get("regime", "?")
-                    _rconf  = _s.get("confidence", 0)
-                except Exception:
-                    pass
-
                 pending_sig = {
                     "symbol":      sym, "tf": tf, "dir": d,
                     "entry_limit": entry,
@@ -552,8 +569,9 @@ def run_cycle(exchange, journal, cfg):
                     "chg_pct":     sig["chg_pct"],
                     "vol_ratio":   sig["vol_ratio"],
                     "btc_trend":   btc_trend,
-                    "regime":      _regime,
-                    "regime_conf": _rconf,
+                    "regime":      market_regime,
+                    "regime_conf": regime_conf,
+                    "fibo_used":   fibo_used,
                     "added_at":    now,
                     "bars_waited": 0,
                 }

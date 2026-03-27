@@ -1,21 +1,21 @@
 {
-  "regime": "SIDEWAYS",
-  "confidence": 50,
-  "recommended_bot": "Bot2_MeanRev",
-  "description": "возврат к среднему",
-  "updated_at": "2026-03-27T11:11:05.504619",
+  "regime": "TREND_DOWN",
+  "confidence": 100,
+  "recommended_bot": "Bot1_EMA",
+  "description": "шорты по тренду",
+  "updated_at": "2026-03-27T23:42:20.387031",
   "details": {
-    "adx": 28.0,
-    "plus_di": 14.7,
-    "minus_di": 27.2,
-    "atr_ratio": 0.82,
-    "bb_width": 0.0096,
-    "bb_avg": 0.0187,
-    "bb_squeeze": true,
-    "bb_expansion": false,
-    "ema20": 69054.72,
-    "ema50": 69625.49,
-    "close": 68734.73,
-    "volatility": 0.531
+    "adx": 66.1,
+    "plus_di": 5.4,
+    "minus_di": 36.0,
+    "atr_ratio": 1.08,
+    "bb_width": 0.0378,
+    "bb_avg": 0.0199,
+    "bb_squeeze": false,
+    "bb_expansion": true,
+    "ema20": 67193.51,
+    "ema50": 68478.1,
+    "close": 65763.88,
+    "volatility": 0.429
   }
 }
