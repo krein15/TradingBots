@@ -92,3 +92,6 @@
 {"ts": "2026-03-28T18:33:26.605925", "regime": "SIDEWAYS", "confidence": 75, "adx": 20.5, "atr_ratio": 0.69, "bb_width": 0.0062, "plus_di": 25.3, "minus_di": 17.5, "btc_close": 66637.19, "ema50": 67340.98}
 {"ts": "2026-03-28T19:03:27.341498", "regime": "SIDEWAYS", "confidence": 50, "adx": 27.8, "atr_ratio": 0.81, "bb_width": 0.0069, "plus_di": 38.7, "minus_di": 13.2, "btc_close": 66771.62, "ema50": 67324.0}
 {"ts": "2026-03-28T19:33:28.214396", "regime": "SIDEWAYS", "confidence": 50, "adx": 27.8, "atr_ratio": 0.85, "bb_width": 0.007, "plus_di": 36.8, "minus_di": 12.6, "btc_close": 66803.98, "ema50": 67325.27}
+{"ts": "2026-03-28T19:45:20.161644", "regime": "SIDEWAYS", "confidence": 50, "adx": 27.8, "atr_ratio": 0.87, "bb_width": 0.0075, "plus_di": 36.2, "minus_di": 12.4, "btc_close": 66942.86, "ema50": 67330.72}
+{"ts": "2026-03-28T20:15:20.972656", "regime": "SIDEWAYS", "confidence": 50, "adx": 30.7, "atr_ratio": 0.86, "bb_width": 0.0075, "plus_di": 32.8, "minus_di": 11.2, "btc_close": 66888.17, "ema50": 67302.11}
+{"ts": "2026-03-28T20:45:21.690128", "regime": "SIDEWAYS", "confidence": 50, "adx": 32.3, "atr_ratio": 1.0, "bb_width": 0.0081, "plus_di": 40.0, "minus_di": 9.5, "btc_close": 67047.99, "ema50": 67308.38}
