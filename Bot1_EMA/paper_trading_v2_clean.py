@@ -80,10 +80,29 @@ CONFIG = {
     "require_confirmation": True,    # монета должна быть сильнее/слабее BTC
     "confirmation_period":  20,      # свечей для сравнения с BTC
     "cooldown_minutes": 120,         # блокировка монеты после LOSS на 2 часа
-    "session_filter":   False,       # 24/7 — данные не подтвердили преимущество сессий
+    "session_filter":   False,
     "journal_file":     "paper_journal.json",
     "log_file":         "paper_log.txt",
-    "scan_interval":    10,          # минут между сканированиями
+    "scan_interval":    10,
+
+    # ── Channel Breakout (TREND режим) ───────
+    "channel_bars":     20,          # свечей для определения канала
+    "bo_vol_mult":      2.0,         # минимальный объём на пробое
+    "min_breakout_pct": 0.002,       # минимальный пробой 0.2%
+    "rr_trend":         3.0,         # RR для тренда (1:3)
+
+    # ── Mean Reversion (SIDEWAYS режим) ──────
+    "rsi_period":       14,
+    "rsi_oversold":     35,
+    "rsi_overbought":   65,
+    "bb_period":        20,
+    "bb_std":           2.0,
+    "max_vol_mr":       3.0,         # объём выше 3x = опасно для MR
+    "rr_sideways":      2.0,         # RR для боковика (1:2)
+
+    # ── Биржа ────────────────────────────────
+    "exchange":         "bitget",
+    "commission":       0.001,       # Bitget spot 0.1%
 }
 
 TIMEFRAME_LABELS = {"1m":"1м","5m":"5м","15m":"15м","1h":"1ч"}
@@ -157,16 +176,25 @@ def save_journal(journal, cfg):
 #  БИРЖА
 # ─────────────────────────────────────────────
 def get_exchange():
-    return ccxt.binance({"enableRateLimit": True})
+    return ccxt.bitget({
+        "enableRateLimit": True,
+        "options": {"defaultType": "spot"},
+    })
 
 
 def get_symbols(exchange, min_vol):
-    tickers = exchange.fetch_tickers()
-    symbols = [(s, t.get("quoteVolume") or 0)
-               for s, t in tickers.items()
-               if s.endswith("/USDT")
-               and s != "BTC/USDT"
-               and (t.get("quoteVolume") or 0) >= min_vol]
+    try:
+        tickers = exchange.fetch_tickers()
+    except Exception:
+        return []
+    symbols = []
+    for s, t in tickers.items():
+        if not s.endswith("/USDT"): continue
+        if ":" in s: continue          # фьючерсы Bitget вида BTC/USDT:USDT
+        if s in ("BTC/USDT",): continue
+        vol = t.get("quoteVolume") or 0
+        if vol >= min_vol:
+            symbols.append((s, vol))
     symbols.sort(key=lambda x: x[1], reverse=True)
     return [s[0] for s in symbols]
 
@@ -217,12 +245,65 @@ def get_btc_trend(exchange, timeframe, cfg):
 #  ИНДИКАТОРЫ И СИГНАЛЫ
 # ─────────────────────────────────────────────
 def add_indicators(df, cfg):
-    c, n, p = df["close"], cfg["impulse_candles"], cfg["vol_avg_period"]
-    df["vol_avg"]      = df["volume"].rolling(p).mean()
-    df["vol_ratio"]    = df["volume"] / df["vol_avg"].replace(0, 1e-9)
-    df["price_chg"]    = (c - c.shift(n)) / c.shift(n)
-    df["impulse_high"] = df["high"].rolling(n).max()
-    df["impulse_low"]  = df["low"].rolling(n).min()
+    """
+    Индикаторы для двух стратегий:
+      TREND   → Channel Breakout (пробой 20-свечного канала)
+      SIDEWAYS → Mean Reversion  (RSI + BB разворот)
+    """
+    c, p = df["close"], cfg["vol_avg_period"]
+
+    # ── Общие ───────────────────────────────
+    df["vol_avg"]   = df["volume"].rolling(p).mean()
+    df["vol_ratio"] = df["volume"] / df["vol_avg"].replace(0, 1e-9)
+
+    # ATR (14 свечей)
+    atr = pd.concat([
+        df["high"] - df["low"],
+        (df["high"] - c.shift()).abs(),
+        (df["low"]  - c.shift()).abs(),
+    ], axis=1).max(axis=1)
+    df["atr"]     = atr.ewm(span=14, adjust=False).mean()
+    df["atr_avg"] = df["atr"].rolling(20).mean()
+
+    # ── TREND: канал последних N свечей ─────
+    n = cfg.get("channel_bars", 20)
+    df["chan_high"] = df["high"].rolling(n).max().shift(1)  # без текущей свечи
+    df["chan_low"]  = df["low"].rolling(n).min().shift(1)
+    df["chan_range_pct"] = (df["chan_high"] - df["chan_low"]) / df["chan_low"]
+
+    # ── SIDEWAYS: RSI + Bollinger Bands ─────
+    period = cfg.get("rsi_period", 14)
+    delta  = c.diff()
+    gain   = delta.clip(lower=0).ewm(span=period, adjust=False).mean()
+    loss   = (-delta).clip(lower=0).ewm(span=period, adjust=False).mean()
+    df["rsi"] = 100 - 100 / (1 + gain / loss.replace(0, 1e-9))
+
+    bb_p   = cfg.get("bb_period", 20)
+    bb_std = cfg.get("bb_std", 2.0)
+    df["bb_mid"] = c.rolling(bb_p).mean()
+    bb_s         = c.rolling(bb_p).std()
+    df["bb_up"]  = df["bb_mid"] + bb_std * bb_s
+    df["bb_dn"]  = df["bb_mid"] - bb_std * bb_s
+    df["bb_width"] = (df["bb_up"] - df["bb_dn"]) / df["bb_mid"]
+
+    # ── ML признаки (общие) ──────────────────
+    body   = (df["close"] - df["open"]).abs()
+    candle = (df["high"] - df["low"]).replace(0, 1e-9)
+    df["body_ratio"]       = body / candle
+    df["impulse_strength"] = df["atr"] / df["atr_avg"].replace(0, 1e-9)
+    ema50 = c.ewm(span=50, adjust=False).mean()
+    df["dist_ema50"] = (c - ema50) / ema50
+    df["atr_pct"]    = df["atr"].rolling(100).rank(pct=True)
+
+    # Серия свечей в одну сторону
+    direction = (df["close"] > df["open"]).astype(int)
+    consec, cnt, prev = [], 0, None
+    for d in direction:
+        cnt = cnt + 1 if d == prev else 1
+        prev = d
+        consec.append(cnt)
+    df["consec_candles"] = pd.Series(consec, index=df.index)
+
     return df
 
 
@@ -254,75 +335,164 @@ def get_coin_trend(df_1h):
     return "bull" if close.iloc[-1] > ema20.iloc[-1] else "bear"
 
 
+def _make_sig(i, d, entry, stop, take, vol, row, sig_type, extra=None):
+    """Формируем словарь сигнала с ML признаками."""
+    s = {
+        "bar":              i,
+        "dir":              d,
+        "type":             sig_type,
+        "entry_limit":      round(float(entry), 6),
+        "stop":             round(float(stop), 6),
+        "take":             round(float(take), 6),
+        "vol_ratio":        round(float(vol), 2),
+        "body_ratio":       round(float(row.get("body_ratio", 0)), 3),
+        "impulse_strength": round(float(row.get("impulse_strength", 0)), 2),
+        "consec_candles":   int(row.get("consec_candles", 0)),
+        "dist_ema50":       round(float(row.get("dist_ema50", 0)), 4),
+        "atr_pct":          round(float(row.get("atr_pct", 0.5)), 3),
+        "bb_width":         round(float(row.get("bb_width", 0)), 4),
+        "rsi":              round(float(row.get("rsi", 50)), 1),
+    }
+    if extra:
+        s.update(extra)
+    return s
+
+
 def find_signals(df, cfg, btc_trend="neutral", btc_chg=0.0, market_regime="?"):
     """
-    btc_chg — изменение BTC за последние N свечей.
-    Логика подтверждения:
-      ЛОНГ: разрешён если монета растёт СИЛЬНЕЕ чем BTC (относительная сила)
-      ШОРТ: разрешён если монета падает СИЛЬНЕЕ чем BTC (относительная слабость)
-      В боковике: оба направления без ограничений
+    Адаптивная стратегия по режиму рынка:
+
+    TREND_UP / TREND_DOWN → Channel Breakout
+      Ищем пробой 20-свечного канала с объёмом.
+      Вход на закрытии пробойной свечи, стоп за канал, RR 1:3.
+      Работает в трендовом рынке — входим на продолжении.
+
+    SIDEWAYS → Mean Reversion
+      RSI < 35 у нижней BB → лонг, RSI > 65 у верхней BB → шорт.
+      Тейк: средняя BB, стоп за BB + буфер, RR 1:2.
+      Работает в боковике — входим на развороте.
+
+    VOLATILE → пауза (нет сигналов)
     """
-    min_chg = cfg["min_price_chg"]
-    min_vol = cfg["min_vol_mult"]
-    # Выбираем Фибо по режиму рынка
-    is_trend = market_regime in ("TREND_UP", "TREND_DOWN")
-    fibo     = cfg.get("fibo_trend", 0.05) if is_trend else cfg["fibo_entry"]
-    buf     = cfg["stop_buffer"]
-    rr      = cfg["rr_ratio"]
-    start   = cfg["impulse_candles"] + cfg["vol_avg_period"]
-    signals = []
-    # В боковике — оба направления
-    # В тренде — только направление тренда + подтверждение силы монеты
-    # Строго: только направление тренда, нет нейтральной зоны
+    signals     = []
+    min_vol     = cfg["min_vol_mult"]
+    buf         = cfg["stop_buffer"]
+    is_trend    = market_regime in ("TREND_UP", "TREND_DOWN")
+    is_sideways = market_regime in ("SIDEWAYS", "?")
+    is_volatile = market_regime == "VOLATILE"
+
+    if is_volatile:
+        return signals
+
     allow_long  = btc_trend == "bull"
     allow_short = btc_trend == "bear"
+    start       = cfg["vol_avg_period"] + 21  # нужно 20 свечей для канала
 
-    for i in range(start, len(df)):
-        row = df.iloc[i]
-        chg, vol = row["price_chg"], row["vol_ratio"]
-        if abs(chg) < min_chg or vol < min_vol:
-            continue
-        imp_high = row["impulse_high"]
-        imp_low  = row["impulse_low"]
-        spread   = imp_high - imp_low
-        if spread <= 0:
-            continue
+    last = df.iloc[-1]
+    vol  = last["vol_ratio"]
 
-        if chg > 0 and allow_long:
-            entry = imp_low + spread * fibo
-            stop  = imp_low * (1 - buf)
-            risk  = entry - stop
-            if risk <= 0 or entry >= imp_high:
-                continue
-            stop_pct = risk / entry if entry > 0 else 1
-            if stop_pct < cfg.get("min_stop_pct", 0) or stop_pct > cfg.get("max_stop_pct", 1):
-                continue  # стоп вне допустимой зоны 0.2-0.5%
-            take = entry + risk * rr
-            signals.append({"bar": i, "dir": 1,
-                             "entry_limit": round(entry, 6),
-                             "stop": round(stop, 6),
-                             "take": round(take, 6),
-                             "chg_pct": round(chg*100, 2),
-                             "vol_ratio": round(vol, 1)})
+    # ═══════════════════════════════════════════
+    #  TREND: Channel Breakout (последние 20 свечей)
+    # ═══════════════════════════════════════════
+    if is_trend and vol >= cfg.get("bo_vol_mult", 2.0):
+        chan_high = last.get("chan_high")
+        chan_low  = last.get("chan_low")
+        close     = last["close"]
+        atr       = last.get("atr", 0)
 
-        elif chg < 0 and allow_short:
-            entry = imp_high - spread * fibo
-            stop  = imp_high * (1 + buf)
-            risk  = stop - entry
-            if risk <= 0 or entry <= imp_low:
-                continue
-            stop_pct = risk / entry if entry > 0 else 1
-            if stop_pct < cfg.get("min_stop_pct", 0) or stop_pct > cfg.get("max_stop_pct", 1):
-                continue  # стоп вне допустимой зоны 0.2-0.5%
-            take = entry - risk * rr
-            if take <= 0:
-                continue
-            signals.append({"bar": i, "dir": -1,
-                             "entry_limit": round(entry, 6),
-                             "stop": round(stop, 6),
-                             "take": round(take, 6),
-                             "chg_pct": round(chg*100, 2),
-                             "vol_ratio": round(vol, 1)})
+        if chan_high and chan_low and atr > 0:
+            chan_range = chan_high - chan_low
+
+            # Пробой вверх
+            if (allow_long
+                    and close > chan_high
+                    and (close - chan_high) / chan_high >= cfg.get("min_breakout_pct", 0.002)
+                    and last.get("body_ratio", 0) >= 0.4):  # чистая свеча
+                entry = close
+                stop  = chan_low * (1 - buf)
+                risk  = entry - stop
+                if risk > 0:
+                    rr   = cfg.get("rr_trend", 3.0)
+                    take = entry + risk * rr
+                    stop_pct = risk / entry
+                    if cfg.get("min_stop_pct",0) <= stop_pct <= cfg.get("max_stop_pct",1):
+                        signals.append(_make_sig(
+                            len(df)-1, 1, entry, stop, take, vol, last,
+                            "BO_ЛОНГ",
+                            {"chg_pct": round((close - chan_high)/chan_high*100, 2),
+                             "chan_range_pct": round(float(last.get("chan_range_pct",0)),4)}
+                        ))
+
+            # Пробой вниз
+            if (allow_short
+                    and close < chan_low
+                    and (chan_low - close) / chan_low >= cfg.get("min_breakout_pct", 0.002)
+                    and last.get("body_ratio", 0) >= 0.4):
+                entry = close
+                stop  = chan_high * (1 + buf)
+                risk  = stop - entry
+                if risk > 0 and entry > 0:
+                    rr   = cfg.get("rr_trend", 3.0)
+                    take = entry - risk * rr
+                    if take > 0:
+                        stop_pct = risk / entry
+                        if cfg.get("min_stop_pct",0) <= stop_pct <= cfg.get("max_stop_pct",1):
+                            signals.append(_make_sig(
+                                len(df)-1, -1, entry, stop, take, vol, last,
+                                "BO_ШОРТ",
+                                {"chg_pct": round((chan_low - close)/chan_low*100, 2),
+                                 "chan_range_pct": round(float(last.get("chan_range_pct",0)),4)}
+                            ))
+
+    # ═══════════════════════════════════════════
+    #  SIDEWAYS: Mean Reversion (RSI + BB)
+    # ═══════════════════════════════════════════
+    if is_sideways:
+        rsi     = last.get("rsi", 50)
+        bb_mid  = last.get("bb_mid")
+        bb_up   = last.get("bb_up")
+        bb_dn   = last.get("bb_dn")
+        close   = last["close"]
+
+        if bb_mid and bb_up and bb_dn:
+            # Лонг: RSI перепродан + цена у нижней BB
+            if (rsi <= cfg.get("rsi_oversold", 35)
+                    and bb_dn * 0.990 <= close <= bb_dn * 1.010
+                    and vol < cfg.get("max_vol_mr", 3.0)):
+                entry = close
+                stop  = bb_dn * (1 - buf)
+                risk  = entry - stop
+                if risk > 0 and bb_mid > entry:
+                    rr   = cfg.get("rr_sideways", 2.0)
+                    take = bb_mid
+                    stop_pct = risk / entry
+                    if stop_pct > 0:
+                        signals.append(_make_sig(
+                            len(df)-1, 1, entry, stop, take, vol, last,
+                            "MR_ЛОНГ",
+                            {"chg_pct": 0, "rsi": round(rsi, 1),
+                             "rr": round((take-entry)/risk, 2)}
+                        ))
+
+            # Шорт: RSI перекуплен + цена у верхней BB
+            if (rsi >= cfg.get("rsi_overbought", 65)
+                    and bb_up * 0.990 <= close <= bb_up * 1.010
+                    and vol < cfg.get("max_vol_mr", 3.0)):
+                entry = close
+                stop  = bb_up * (1 + buf)
+                risk  = stop - entry
+                if risk > 0 and bb_mid < entry:
+                    rr   = cfg.get("rr_sideways", 2.0)
+                    take = bb_mid
+                    stop_pct = risk / entry
+                    if stop_pct > 0:
+                        signals.append(_make_sig(
+                            len(df)-1, -1, entry, stop, take, vol, last,
+                            "MR_ШОРТ",
+                            {"chg_pct": 0, "rsi": round(rsi, 1),
+                             "rr": round((entry-take)/risk, 2)}
+                        ))
+
     return signals
 
 
@@ -373,7 +543,7 @@ def run_cycle(exchange, journal, cfg):
         p["bars_waited"] = p.get("bars_waited", 0) + 1
         entry   = p["entry_limit"]
         d       = p["dir"]
-        filled  = (entry * 0.997 <= price <= entry * 1.003)  # ±0.3% от входа
+        filled  = (entry * 0.997 <= price <= entry * 1.003)  # ±0.3%
         expired = p["bars_waited"] >= cfg["max_wait_bars"]
 
         if filled:
@@ -560,17 +730,42 @@ def run_cycle(exchange, journal, cfg):
                 if last_vol < 1.2:
                     continue  # объём слабый — пропускаем
 
+                # Дополнительные признаки для ML
+                try:
+                    ticker   = exchange.fetch_ticker(sym)
+                    spread_p = abs(ticker.get("ask", 0) - ticker.get("bid", 0))
+                    spread_p = round(spread_p / ticker.get("last", 1) * 100, 4) if ticker.get("last") else 0
+                except Exception:
+                    spread_p = 0
+
+                # Относительная сила монеты vs BTC (за последние 3 свечи)
+                try:
+                    rel_strength = round(sig["chg_pct"] - btc_chg * 100, 3)
+                except Exception:
+                    rel_strength = 0
+
                 pending_sig = {
                     "symbol":      sym, "tf": tf, "dir": d,
+                    "exchange":    cfg.get("exchange", "bitget"),
+                    "signal_type": sig.get("type", "?"),
                     "entry_limit": entry,
                     "stop":        sig["stop"],
                     "take":        sig["take"],
                     "chg_pct":     sig["chg_pct"],
                     "vol_ratio":   sig["vol_ratio"],
                     "btc_trend":   btc_trend,
+                    "btc_momentum": round(btc_chg * 100, 3),  # скорость BTC
                     "regime":      market_regime,
                     "regime_conf": regime_conf,
                     "fibo_used":   fibo_used,
+                    # Признаки качества сигнала
+                    "body_ratio":       sig.get("body_ratio", 0),
+                    "impulse_strength": sig.get("impulse_strength", 0),
+                    "consec_candles":   sig.get("consec_candles", 0),
+                    "dist_ema50":       sig.get("dist_ema50", 0),
+                    "atr_pct":          sig.get("atr_pct", 0.5),
+                    "spread_pct":       spread_p,
+                    "rel_strength":     rel_strength,
                     "added_at":    now,
                     "bars_waited": 0,
                 }
@@ -579,8 +774,9 @@ def run_cycle(exchange, journal, cfg):
                 open_count += 1
                 new_sigs   += 1
                 d_ru = "ЛОНГ" if d == 1 else "ШОРТ"
-                log(f"➕ СИГНАЛ   {sym} [{tf}] {d_ru} "
-                    f"лимит={entry} стоп={sig['stop']} тейк={sig['take']}", cfg)
+                log(f"➕ СИГНАЛ   {sym} [{tf}] {d_ru} [{sig.get('type','?')}] "
+                    f"лимит={entry} стоп={sig['stop']} тейк={sig['take']} "
+                    f"vol={sig.get('vol_ratio',0):.1f}x", cfg)
 
     journal["scan_count"] = journal.get("scan_count", 0) + 1
     return journal, new_sigs

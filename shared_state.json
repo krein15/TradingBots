@@ -3,19 +3,19 @@
   "confidence": 50,
   "recommended_bot": "Bot2_MeanRev",
   "description": "возврат к среднему",
-  "updated_at": "2026-03-28T20:45:21.690128",
+  "updated_at": "2026-03-31T10:06:10.044602",
   "details": {
-    "adx": 32.3,
-    "plus_di": 40.0,
-    "minus_di": 9.5,
-    "atr_ratio": 1.0,
-    "bb_width": 0.0081,
-    "bb_avg": 0.0164,
-    "bb_squeeze": true,
+    "adx": 27.5,
+    "plus_di": 29.5,
+    "minus_di": 20.6,
+    "atr_ratio": 1.01,
+    "bb_width": 0.0144,
+    "bb_avg": 0.0155,
+    "bb_squeeze": false,
     "bb_expansion": false,
-    "ema20": 66568.43,
-    "ema50": 67308.38,
-    "close": 67047.99,
-    "volatility": 0.407
+    "ema20": 67305.37,
+    "ema50": 67131.0,
+    "close": 67539.64,
+    "volatility": 0.391
   }
 }

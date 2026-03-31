@@ -198,6 +198,7 @@ def extract_features(trade, bot_name, deposit, regime_records=None):
         # Идентификаторы
         "bot":           bot_name,
         "symbol":        trade.get("symbol", ""),
+        "exchange":      trade.get("exchange", "binance"),
         "tf":            tf,
         "tf_minutes":    tf_minutes,
         "direction":     direction,
@@ -226,12 +227,22 @@ def extract_features(trade, bot_name, deposit, regime_records=None):
         "is_asia":       is_asia,
 
         # Индикаторы
-        "vol_ratio":     vol_ratio,
-        "rsi":           rsi,
-        "adx":           adx,
-        "bb_width":      bb_width,
-        "funding_rate":  fr,
-        "atr_ratio":     atr_ratio,
+        "vol_ratio":        vol_ratio,
+        "rsi":              rsi,
+        "adx":              adx,
+        "bb_width":         bb_width,
+        "funding_rate":     fr,
+        "atr_ratio":        atr_ratio,
+
+        # Новые признаки качества сигнала (Bot1 EMA)
+        "body_ratio":       float(trade.get("body_ratio",       0)),
+        "impulse_strength": float(trade.get("impulse_strength", 0)),
+        "consec_candles":   int(trade.get("consec_candles",     0)),
+        "dist_ema50":       float(trade.get("dist_ema50",        0)),
+        "atr_pct":          float(trade.get("atr_pct",          0.5)),
+        "spread_pct":       float(trade.get("spread_pct",        0)),
+        "rel_strength":     float(trade.get("rel_strength",      0)),
+        "btc_momentum":     float(trade.get("btc_momentum",      0)),
 
         # Wyckoff/SMC (legacy)
         "sc_drop_pct":   sc_drop,

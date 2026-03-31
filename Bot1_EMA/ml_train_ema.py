@@ -39,13 +39,38 @@ def train():
         return
 
     features = [
-        "tf_minutes", "risk_pct", "reward_pct", "rr_planned",
-        "vol_ratio", "hour", "day_of_week", "is_london",
-        "is_newyork", "is_night", "is_asia", "dir_enc"
+        # Риск-менеджмент
+        "risk_pct",           # размер стопа — главный признак
+        # Объём
+        "vol_ratio",          # объём на входе
+        # Время
+        "hour",
+        "day_of_week",
+        "is_weekend",
+        "is_london",
+        "is_newyork",
+        "is_night",
+        "is_asia",
+        # Режим рынка
+        "regime_conf",
+        "dir_enc",
+        "regime_enc",
+        # Качество импульса
+        "body_ratio",         # чистота свечи (0=доджи, 1=чистая)
+        "impulse_strength",   # сила в единицах ATR
+        "consec_candles",     # серия свечей в одну сторону
+        "dist_ema50",         # расстояние от EMA50
+        "atr_pct",            # перцентиль ATR (высокая ли волатильность)
+        # Рыночный контекст
+        "spread_pct",         # спред bid/ask (ликвидность)
+        "rel_strength",       # сила монеты vs BTC
+        "btc_momentum",       # скорость BTC
     ]
 
     le_dir = LabelEncoder()
-    ema["dir_enc"] = le_dir.fit_transform(ema["direction"])
+    le_reg = LabelEncoder()
+    ema["dir_enc"]    = le_dir.fit_transform(ema["direction"])
+    ema["regime_enc"] = le_reg.fit_transform(ema["regime"].fillna("?"))
     X = ema[features].fillna(0)
     y = ema["target"]
 
@@ -80,6 +105,7 @@ def train():
         "model":      model,
         "features":   features,
         "le_dir":     le_dir,
+        "le_reg":     le_reg,
         "trained_on": len(ema),
         "wr_base":    round(y.mean()*100,1),
         "auc":        round(auc.mean(),3),
