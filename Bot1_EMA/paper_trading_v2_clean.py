@@ -86,9 +86,9 @@ CONFIG = {
     "scan_interval":    10,
 
     # ── Channel Breakout (TREND режим) ───────
-    "channel_bars":     20,          # свечей для определения канала
-    "bo_vol_mult":      2.0,         # минимальный объём на пробое
-    "min_breakout_pct": 0.002,       # минимальный пробой 0.2%
+    "channel_bars":     15,          # свечей для канала (было 20)
+    "bo_vol_mult":      1.5,         # объём на пробое (было 2.0)
+    "min_breakout_pct": 0.001,       # минимальный пробой 0.1% (было 0.2%)
     "rr_trend":         3.0,         # RR для тренда (1:3)
 
     # ── Mean Reversion (SIDEWAYS режим) ──────
@@ -99,6 +99,7 @@ CONFIG = {
     "bb_std":           2.0,
     "max_vol_mr":       3.0,         # объём выше 3x = опасно для MR
     "rr_sideways":      2.0,         # RR для боковика (1:2)
+    "min_rr_mr":        1.5,         # минимальный RR для MR (BB слишком узкие = пропускаем)
 
     # ── Биржа ────────────────────────────────
     "exchange":         "bitget",
@@ -407,7 +408,7 @@ def find_signals(df, cfg, btc_trend="neutral", btc_chg=0.0, market_regime="?"):
             if (allow_long
                     and close > chan_high
                     and (close - chan_high) / chan_high >= cfg.get("min_breakout_pct", 0.002)
-                    and last.get("body_ratio", 0) >= 0.4):  # чистая свеча
+                    and last.get("body_ratio", 0) >= 0.3):  # чистая свеча
                 entry = close
                 stop  = chan_low * (1 - buf)
                 risk  = entry - stop
@@ -427,7 +428,7 @@ def find_signals(df, cfg, btc_trend="neutral", btc_chg=0.0, market_regime="?"):
             if (allow_short
                     and close < chan_low
                     and (chan_low - close) / chan_low >= cfg.get("min_breakout_pct", 0.002)
-                    and last.get("body_ratio", 0) >= 0.4):
+                    and last.get("body_ratio", 0) >= 0.3):
                 entry = close
                 stop  = chan_high * (1 + buf)
                 risk  = stop - entry
@@ -463,15 +464,16 @@ def find_signals(df, cfg, btc_trend="neutral", btc_chg=0.0, market_regime="?"):
                 stop  = bb_dn * (1 - buf)
                 risk  = entry - stop
                 if risk > 0 and bb_mid > entry:
-                    rr   = cfg.get("rr_sideways", 2.0)
+                    rr_actual = (bb_mid - entry) / risk
                     take = bb_mid
                     stop_pct = risk / entry
-                    if stop_pct > 0:
+                    min_rr = cfg.get("min_rr_mr", 1.5)
+                    if stop_pct > 0 and rr_actual >= min_rr:
                         signals.append(_make_sig(
                             len(df)-1, 1, entry, stop, take, vol, last,
                             "MR_ЛОНГ",
                             {"chg_pct": 0, "rsi": round(rsi, 1),
-                             "rr": round((take-entry)/risk, 2)}
+                             "rr": round(rr_actual, 2)}
                         ))
 
             # Шорт: RSI перекуплен + цена у верхней BB
@@ -482,15 +484,16 @@ def find_signals(df, cfg, btc_trend="neutral", btc_chg=0.0, market_regime="?"):
                 stop  = bb_up * (1 + buf)
                 risk  = stop - entry
                 if risk > 0 and bb_mid < entry:
-                    rr   = cfg.get("rr_sideways", 2.0)
+                    rr_actual = (entry - bb_mid) / risk
                     take = bb_mid
                     stop_pct = risk / entry
-                    if stop_pct > 0:
+                    min_rr = cfg.get("min_rr_mr", 1.5)
+                    if stop_pct > 0 and rr_actual >= min_rr:
                         signals.append(_make_sig(
                             len(df)-1, -1, entry, stop, take, vol, last,
                             "MR_ШОРТ",
                             {"chg_pct": 0, "rsi": round(rsi, 1),
-                             "rr": round((entry-take)/risk, 2)}
+                             "rr": round(rr_actual, 2)}
                         ))
 
     return signals

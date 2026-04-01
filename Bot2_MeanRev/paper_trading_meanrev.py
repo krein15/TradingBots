@@ -268,6 +268,8 @@ def ml_filter(sig, regime_info, ml_data):
         return True, 1.0
     try:
         import numpy as np
+        import warnings
+        warnings.filterwarnings("ignore", category=UserWarning)
         model    = ml_data["model"]
         features = ml_data["features"]
         le_dir   = ml_data["le_dir"]
@@ -295,7 +297,8 @@ def ml_filter(sig, regime_info, ml_data):
             "dir_enc":    dir_enc,
             "regime_enc": reg_enc,
         }
-        row  = np.array([[feat_map.get(f, 0) for f in features]])
+        import pandas as _pd
+        row  = _pd.DataFrame([[feat_map.get(f, 0) for f in features]], columns=features)
         prob = model.predict_proba(row)[0][1]
         return prob >= thresh, round(prob, 3)
     except Exception:
