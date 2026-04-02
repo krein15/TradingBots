@@ -109,6 +109,52 @@ CONFIG = {
 TIMEFRAME_LABELS = {"1m":"1м","5m":"5м","15m":"15м","1h":"1ч"}
 
 
+def ml_filter_bot1(sig, hour, regime, regime_conf, btc_trend):
+    """ML фильтр для Bot1. Возвращает (pass, prob)."""
+    if ML_MODEL is None:
+        return True, 1.0
+    try:
+        import warnings, pandas as _pd
+        warnings.filterwarnings("ignore", category=UserWarning)
+        features = ML_MODEL.get("features", [])
+        le_dir   = ML_MODEL.get("le_dir")
+        le_reg   = ML_MODEL.get("le_reg")
+        model    = ML_MODEL["model"]
+
+        direction = "LONG" if sig["dir"] == 1 else "SHORT"
+        dir_enc = le_dir.transform([direction])[0] if le_dir and direction in le_dir.classes_ else 0
+        reg_str = regime if regime else "?"
+        reg_enc = le_reg.transform([reg_str])[0] if le_reg and reg_str in le_reg.classes_ else 0
+
+        feat_map = {
+            "risk_pct":          sig.get("stop_pct", 0.003),
+            "vol_ratio":         sig.get("vol_ratio", 1.0),
+            "hour":              hour,
+            "day_of_week":       __import__("datetime").datetime.now().weekday(),
+            "is_weekend":        1 if __import__("datetime").datetime.now().weekday() >= 5 else 0,
+            "is_london":         1 if 7 <= hour < 12 else 0,
+            "is_newyork":        1 if 13 <= hour < 18 else 0,
+            "is_night":          1 if hour >= 22 or hour < 6 else 0,
+            "is_asia":           1 if 0 <= hour < 7 else 0,
+            "regime_conf":       regime_conf,
+            "dir_enc":           dir_enc,
+            "regime_enc":        reg_enc,
+            "body_ratio":        sig.get("body_ratio", 0.5),
+            "impulse_strength":  sig.get("impulse_strength", 1.0),
+            "consec_candles":    sig.get("consec_candles", 1),
+            "dist_ema50":        sig.get("dist_ema50", 0),
+            "atr_pct":           sig.get("atr_pct", 0.5),
+            "spread_pct":        sig.get("spread_pct", 0),
+            "rel_strength":      sig.get("rel_strength", 0),
+            "btc_momentum":      sig.get("btc_momentum", 0),
+        }
+        row  = _pd.DataFrame([[feat_map.get(f, 0) for f in features]], columns=features)
+        prob = model.predict_proba(row)[0][1]
+        return prob >= ML_THRESHOLD, round(prob, 3)
+    except Exception:
+        return True, 1.0
+
+
 # ─────────────────────────────────────────────
 #  ФИЛЬТР ТОРГОВОЙ СЕССИИ
 # ─────────────────────────────────────────────
@@ -457,7 +503,9 @@ def find_signals(df, cfg, btc_trend="neutral", btc_chg=0.0, market_regime="?"):
 
         if bb_mid and bb_up and bb_dn:
             # Лонг: RSI перепродан + цена у нижней BB
-            if (rsi <= cfg.get("rsi_oversold", 35)
+            # BTC фильтр: при медвежьем BTC MR_ЛОНГ WR=36% — не берём
+            if (btc_trend != "bear"
+                    and rsi <= cfg.get("rsi_oversold", 35)
                     and bb_dn * 0.990 <= close <= bb_dn * 1.010
                     and vol < cfg.get("max_vol_mr", 3.0)):
                 entry = close
@@ -468,7 +516,10 @@ def find_signals(df, cfg, btc_trend="neutral", btc_chg=0.0, market_regime="?"):
                     take = bb_mid
                     stop_pct = risk / entry
                     min_rr = cfg.get("min_rr_mr", 1.5)
-                    if stop_pct > 0 and rr_actual >= min_rr:
+                    min_sp = cfg.get("min_stop_pct", 0)
+                    max_sp = cfg.get("max_stop_pct", 1)
+                    if (stop_pct >= min_sp and stop_pct <= max_sp
+                            and rr_actual >= min_rr):
                         signals.append(_make_sig(
                             len(df)-1, 1, entry, stop, take, vol, last,
                             "MR_ЛОНГ",
@@ -488,7 +539,10 @@ def find_signals(df, cfg, btc_trend="neutral", btc_chg=0.0, market_regime="?"):
                     take = bb_mid
                     stop_pct = risk / entry
                     min_rr = cfg.get("min_rr_mr", 1.5)
-                    if stop_pct > 0 and rr_actual >= min_rr:
+                    min_sp = cfg.get("min_stop_pct", 0)
+                    max_sp = cfg.get("max_stop_pct", 1)
+                    if (stop_pct >= min_sp and stop_pct <= max_sp
+                            and rr_actual >= min_rr):
                         signals.append(_make_sig(
                             len(df)-1, -1, entry, stop, take, vol, last,
                             "MR_ШОРТ",
@@ -751,6 +805,7 @@ def run_cycle(exchange, journal, cfg):
                     "symbol":      sym, "tf": tf, "dir": d,
                     "exchange":    cfg.get("exchange", "bitget"),
                     "signal_type": sig.get("type", "?"),
+                    "ml_prob":     ml_prob,
                     "entry_limit": entry,
                     "stop":        sig["stop"],
                     "take":        sig["take"],
@@ -776,10 +831,19 @@ def run_cycle(exchange, journal, cfg):
                 existing.add(key)
                 open_count += 1
                 new_sigs   += 1
+                # ML фильтр
+                current_hour = datetime.now().hour
+                ml_pass, ml_prob = ml_filter_bot1(
+                    sig, current_hour, market_regime, regime_conf, btc_trend)
                 d_ru = "ЛОНГ" if d == 1 else "ШОРТ"
+                if not ml_pass:
+                    log(f"🚫 ML [{ml_prob}] отклонил {sym} {d_ru} [{sig.get('type','?')}]",
+                        cfg, show=True)
+                    continue
+
                 log(f"➕ СИГНАЛ   {sym} [{tf}] {d_ru} [{sig.get('type','?')}] "
                     f"лимит={entry} стоп={sig['stop']} тейк={sig['take']} "
-                    f"vol={sig.get('vol_ratio',0):.1f}x", cfg)
+                    f"vol={sig.get('vol_ratio',0):.1f}x  prob={ml_prob}", cfg)
 
     journal["scan_count"] = journal.get("scan_count", 0) + 1
     return journal, new_sigs

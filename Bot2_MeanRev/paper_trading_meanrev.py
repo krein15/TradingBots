@@ -214,95 +214,12 @@ def find_signals(df, cfg):
                 "rr":       round((take - entry) / risk, 2),
             })
 
-    # ШОРТ: RSI перекуплен + цена у верхней BB
-    if ind["rsi"] >= cfg["rsi_overbought"]:
-        # Цена должна быть ОКОЛО верхней BB — не ниже на 0.3%
-        near_up = ind["bb_up"] * 0.997 <= close_now <= ind["bb_up"] * 1.003
-        if near_up:
-            entry = close_now
-            stop  = ind["bb_up"] * (1 + buf)
-            risk  = stop - entry
-            if risk <= 0:
-                return signals
-            take  = ind["bb_mid"]
-            if take >= entry:
-                return signals
-            signals.append({
-                "dir":      -1,
-                "entry":    round(entry, 6),
-                "stop":     round(stop, 6),
-                "take":     round(take, 6),
-                "type":     "MR_ШОРТ",
-                "rsi":      ind["rsi"],
-                "adx":      ind["adx"],
-                "bb_width": ind["bb_width"],
-                "vol":      round(vol_now, 2),
-                "rr":       round((entry - take) / risk, 2),
-            })
+    # ШОРТ отключён — математически убыточен:
+    # RR реальный 0.54, точка безубытка WR=65%, факт WR=42%
+    # Данные 107 сделок: SHORT PnL = -$32.35
+    # if ind["rsi"] >= cfg["rsi_overbought"]: ...
 
     return signals
-
-
-
-def load_ml_model(cfg):
-    """Загружаем ML модель если она есть в папке бота."""
-    import os, pickle
-    model_path = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "ml_model_meanrev.pkl"
-    )
-    try:
-        with open(model_path, "rb") as f:
-            return pickle.load(f)
-    except Exception:
-        return None
-
-
-def ml_filter(sig, regime_info, ml_data):
-    """
-    ML фильтр сигнала.
-    Возвращает (pass: bool, prob: float)
-    Если модели нет — пропускаем всё.
-    """
-    if ml_data is None:
-        return True, 1.0
-    try:
-        import numpy as np
-        import warnings
-        warnings.filterwarnings("ignore", category=UserWarning)
-        model    = ml_data["model"]
-        features = ml_data["features"]
-        le_dir   = ml_data["le_dir"]
-        le_reg   = ml_data["le_reg"]
-        thresh   = ml_data["threshold"]
-
-        direction  = "LONG" if sig["dir"] == 1 else "SHORT"
-        regime_str = regime_info.get("regime", "?")
-        hour       = datetime.now().hour
-        dow        = datetime.now().weekday()
-
-        dir_enc = le_dir.transform([direction])[0] if direction in le_dir.classes_ else 0
-        reg_enc = le_reg.transform([regime_str])[0] if regime_str in le_reg.classes_ else 0
-
-        feat_map = {
-            "rsi":        sig.get("rsi", 50),
-            "adx":        sig.get("adx", 20),
-            "bb_width":   sig.get("bb_width", 0.02),
-            "vol_ratio":  sig.get("vol", 1.0),
-            "hour":       hour,
-            "day_of_week": dow,
-            "is_london":  1 if 7 <= hour < 12 else 0,
-            "is_newyork": 1 if 13 <= hour < 18 else 0,
-            "regime_conf": regime_info.get("confidence", regime_info.get("regime_conf", 50)),
-            "dir_enc":    dir_enc,
-            "regime_enc": reg_enc,
-        }
-        import pandas as _pd
-        row  = _pd.DataFrame([[feat_map.get(f, 0) for f in features]], columns=features)
-        prob = model.predict_proba(row)[0][1]
-        return prob >= thresh, round(prob, 3)
-    except Exception:
-        return True, 1.0
 
 
 def run_cycle(ex, journal, cfg):
@@ -405,9 +322,6 @@ def run_cycle(ex, journal, cfg):
     symbols  = get_symbols(ex, cfg["min_usdt_vol"])
     new_sigs = 0
 
-    # ML модель — загружаем раз в цикл
-    ml_data = load_ml_model(cfg)
-
     for tf in cfg["timeframes"]:
         if open_cnt >= cfg["max_trades"]: break
         for sym in symbols[:100]:
@@ -421,41 +335,15 @@ def run_cycle(ex, journal, cfg):
             sig = sigs[0]
             key = f"{sym}_{sig['dir']}"
             if key in existing: continue
-
             # Читаем текущий режим рынка
             regime_info = {}
             try:
                 import json as _json
                 with open("C:\\TradingBots\\shared_state.json") as _f:
                     _s = _json.load(_f)
-                regime_info = {"regime": _s.get("regime","?"),
-                               "confidence": _s.get("confidence",0),
-                               "regime_conf": _s.get("confidence",0)}
+                regime_info = {"regime": _s.get("regime","?"), "regime_conf": _s.get("confidence",0)}
             except Exception:
                 pass
-
-            # BTC тренд фильтр — шорты не берём в медвежьем рынке
-            _btc_tr = "neutral"
-            try:
-                _btc_df = fetch_df(ex, "BTC/USDT", "1h", 60, cfg)
-                if _btc_df is not None:
-                    _ema = _btc_df["close"].ewm(span=50, adjust=False).mean()
-                    _lc  = _btc_df["close"].iloc[-1]
-                    if _lc > _ema.iloc[-1] * 1.005: _btc_tr = "bull"
-                    elif _lc < _ema.iloc[-1] * 0.995: _btc_tr = "bear"
-            except Exception:
-                pass
-
-            if sig["dir"] == -1 and _btc_tr == "bear":
-                log(f"⛔ BTC медвежий — шорт {sym} пропущен", cfg, show=False)
-                continue
-
-            # ML фильтр
-            ml_pass, ml_prob = ml_filter(sig, regime_info, ml_data)
-            d_ru = "ЛОНГ" if sig["dir"]==1 else "ШОРТ"
-            if not ml_pass:
-                log(f"🚫 ML [{ml_prob}] отклонил {sym} {d_ru}", cfg, show=True)
-                continue
 
             journal["pending"].append({
                 "symbol": sym, "tf": tf,
@@ -466,15 +354,15 @@ def run_cycle(ex, journal, cfg):
                 "vol": sig["vol"], "rr": sig["rr"],
                 "regime": regime_info.get("regime", "?"),
                 "regime_conf": regime_info.get("regime_conf", 0),
-                "ml_prob": ml_prob,
                 "added": now, "waited": 0,
             })
             existing.add(key)
             open_cnt += 1
             new_sigs += 1
+            d_ru = "ЛОНГ" if sig["dir"]==1 else "ШОРТ"
             log(f"➕ {sym} [{tf}] {d_ru} [{sig['type']}] "
                 f"RSI={sig['rsi']} ADX={sig['adx']} "
-                f"BB={sig['bb_width']} prob={ml_prob} "
+                f"BB_width={sig['bb_width']} "
                 f"вход={sig['entry']} стоп={sig['stop']} "
                 f"тейк={sig['take']}", cfg)
 
@@ -529,19 +417,8 @@ def main():
     print(f"  📊 БОТ #2 v3 — MEAN REVERSION")
     print(f"  Стратегия: RSI + Bollinger Bands в боковике")
     print(f"  ADX < {cfg['adx_max']} (только флет)  RR 1:{cfg['rr']}")
+    print(f"  ⚠️  ШОРТЫ ОТКЛЮЧЕНЫ — убыточны математически (RR реальный 0.54)")
     print(f"  TF: {', '.join(cfg['timeframes'])}  Binance")
-    print(f"  min_rr >= {cfg.get('min_rr', '?')}  BTC тренд фильтр шортов: ВКЛ")
-
-    # ML модель
-    _ml = load_ml_model(cfg)
-    if _ml:
-        print(f"  🤖 ML модель: AUC={_ml.get('auc_cv','?')}  "
-              f"порог={_ml.get('threshold','?')}  "
-              f"WR при пороге={_ml.get('wr_at_thresh','?')}%  "
-              f"обучена на {_ml.get('trained_on','?')} сд")
-    else:
-        print(f"  🤖 ML модель: НЕ НАЙДЕНА — работаем без фильтра")
-        print(f"     Запусти ml_train_meanrev.py для обучения")
     print("="*60)
 
     log("="*50, cfg)
