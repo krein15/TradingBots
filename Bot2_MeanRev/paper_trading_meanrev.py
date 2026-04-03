@@ -201,6 +201,11 @@ def find_signals(df, cfg):
             take  = ind["bb_mid"]  # тейк = средняя BB
             if take <= entry:
                 return signals
+            # Фильтр: профит должен покрывать комиссию (2x comm за вход+выход)
+            # Без этого стейблы и узкие BB дают гарантированный минус
+            min_profit_pct = cfg["commission"] * 3  # 0.3% минимум
+            if (take - entry) / entry < min_profit_pct:
+                return signals
             signals.append({
                 "dir":      1,
                 "entry":    round(entry, 6),

@@ -1,21 +1,21 @@
 {
   "regime": "SIDEWAYS",
-  "confidence": 50,
+  "confidence": 75,
   "recommended_bot": "Bot2_MeanRev",
   "description": "возврат к среднему",
-  "updated_at": "2026-04-03T10:29:11.764049",
+  "updated_at": "2026-04-03T15:46:30.557002",
   "details": {
-    "adx": 27.4,
-    "plus_di": 9.4,
-    "minus_di": 23.5,
-    "atr_ratio": 0.77,
-    "bb_width": 0.0086,
-    "bb_avg": 0.0162,
+    "adx": 21.2,
+    "plus_di": 20.0,
+    "minus_di": 18.5,
+    "atr_ratio": 0.8,
+    "bb_width": 0.0051,
+    "bb_avg": 0.0113,
     "bb_squeeze": true,
     "bb_expansion": false,
-    "ema20": 66789.16,
-    "ema50": 67111.92,
-    "close": 66544.71,
-    "volatility": 0.489
+    "ema20": 66832.68,
+    "ema50": 67082.63,
+    "close": 66811.77,
+    "volatility": 0.483
   }
 }

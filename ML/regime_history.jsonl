@@ -345,3 +345,13 @@
 {"ts": "2026-04-03T09:29:10.154110", "regime": "SIDEWAYS", "confidence": 50, "adx": 25.1, "atr_ratio": 0.77, "bb_width": 0.0087, "plus_di": 10.7, "minus_di": 23.0, "btc_close": 66573.05, "ema50": 67125.01}
 {"ts": "2026-04-03T09:59:11.063917", "regime": "SIDEWAYS", "confidence": 50, "adx": 25.1, "atr_ratio": 0.79, "bb_width": 0.0087, "plus_di": 10.5, "minus_di": 22.5, "btc_close": 66622.52, "ema50": 67126.95}
 {"ts": "2026-04-03T10:29:11.764049", "regime": "SIDEWAYS", "confidence": 50, "adx": 27.4, "atr_ratio": 0.77, "bb_width": 0.0086, "plus_di": 9.4, "minus_di": 23.5, "btc_close": 66544.71, "ema50": 67111.92}
+{"ts": "2026-04-03T11:16:23.088880", "regime": "SIDEWAYS", "confidence": 75, "adx": 23.6, "atr_ratio": 0.75, "bb_width": 0.0084, "plus_di": 12.5, "minus_di": 18.3, "btc_close": 66636.95, "ema50": 67096.36}
+{"ts": "2026-04-03T11:46:24.041773", "regime": "SIDEWAYS", "confidence": 75, "adx": 23.6, "atr_ratio": 0.79, "bb_width": 0.0084, "plus_di": 11.8, "minus_di": 17.3, "btc_close": 66782.42, "ema50": 67102.06}
+{"ts": "2026-04-03T12:16:25.033477", "regime": "SIDEWAYS", "confidence": 75, "adx": 20.6, "atr_ratio": 0.74, "bb_width": 0.0077, "plus_di": 15.8, "minus_di": 16.2, "btc_close": 66828.39, "ema50": 67099.97}
+{"ts": "2026-04-03T12:46:25.849042", "regime": "SIDEWAYS", "confidence": 75, "adx": 24.4, "atr_ratio": 0.84, "bb_width": 0.008, "plus_di": 26.3, "minus_di": 14.2, "btc_close": 67050.0, "ema50": 67108.66}
+{"ts": "2026-04-03T13:16:26.636606", "regime": "SIDEWAYS", "confidence": 50, "adx": 25.6, "atr_ratio": 0.82, "bb_width": 0.0068, "plus_di": 25.3, "minus_di": 12.8, "btc_close": 67216.76, "ema50": 67110.34}
+{"ts": "2026-04-03T13:46:27.450071", "regime": "SIDEWAYS", "confidence": 50, "adx": 25.6, "atr_ratio": 0.86, "bb_width": 0.0063, "plus_di": 24.1, "minus_di": 12.1, "btc_close": 66900.57, "ema50": 67097.94}
+{"ts": "2026-04-03T14:16:28.238403", "regime": "SIDEWAYS", "confidence": 50, "adx": 26.2, "atr_ratio": 0.8, "bb_width": 0.0051, "plus_di": 22.8, "minus_di": 12.2, "btc_close": 66909.46, "ema50": 67089.56}
+{"ts": "2026-04-03T14:46:29.028303", "regime": "SIDEWAYS", "confidence": 75, "adx": 23.9, "atr_ratio": 0.84, "bb_width": 0.0051, "plus_di": 21.7, "minus_di": 16.7, "btc_close": 66881.99, "ema50": 67088.48}
+{"ts": "2026-04-03T15:16:29.807959", "regime": "SIDEWAYS", "confidence": 75, "adx": 22.4, "atr_ratio": 0.77, "bb_width": 0.0051, "plus_di": 20.9, "minus_di": 16.1, "btc_close": 66793.19, "ema50": 67081.9}
+{"ts": "2026-04-03T15:46:30.557002", "regime": "SIDEWAYS", "confidence": 75, "adx": 21.2, "atr_ratio": 0.8, "bb_width": 0.0051, "plus_di": 20.0, "minus_di": 18.5, "btc_close": 66811.77, "ema50": 67082.63}
