@@ -787,6 +787,16 @@ def run_cycle(exchange, journal, cfg):
                 if last_vol < 1.2:
                     continue  # объём слабый — пропускаем
 
+                # ML фильтр — СНАЧАЛА проверяем, потом добавляем
+                current_hour = datetime.now().hour
+                ml_pass, ml_prob = ml_filter_bot1(
+                    sig, current_hour, market_regime, regime_conf, btc_trend)
+                d_ru = "ЛОНГ" if d == 1 else "ШОРТ"
+                if not ml_pass:
+                    log(f"🚫 ML [{ml_prob}] отклонил {sym} {d_ru} [{sig.get('type','?')}]",
+                        cfg, show=True)
+                    continue
+
                 # Дополнительные признаки для ML
                 try:
                     ticker   = exchange.fetch_ticker(sym)
@@ -812,7 +822,7 @@ def run_cycle(exchange, journal, cfg):
                     "chg_pct":     sig["chg_pct"],
                     "vol_ratio":   sig["vol_ratio"],
                     "btc_trend":   btc_trend,
-                    "btc_momentum": round(btc_chg * 100, 3),  # скорость BTC
+                    "btc_momentum": round(btc_chg * 100, 3),
                     "regime":      market_regime,
                     "regime_conf": regime_conf,
                     "fibo_used":   fibo_used,
@@ -831,15 +841,6 @@ def run_cycle(exchange, journal, cfg):
                 existing.add(key)
                 open_count += 1
                 new_sigs   += 1
-                # ML фильтр
-                current_hour = datetime.now().hour
-                ml_pass, ml_prob = ml_filter_bot1(
-                    sig, current_hour, market_regime, regime_conf, btc_trend)
-                d_ru = "ЛОНГ" if d == 1 else "ШОРТ"
-                if not ml_pass:
-                    log(f"🚫 ML [{ml_prob}] отклонил {sym} {d_ru} [{sig.get('type','?')}]",
-                        cfg, show=True)
-                    continue
 
                 log(f"➕ СИГНАЛ   {sym} [{tf}] {d_ru} [{sig.get('type','?')}] "
                     f"лимит={entry} стоп={sig['stop']} тейк={sig['take']} "
