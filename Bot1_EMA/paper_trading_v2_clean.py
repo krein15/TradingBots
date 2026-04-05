@@ -68,8 +68,8 @@ CONFIG = {
     "rr_ratio":          4.0,
     "commission":       0.001,
     "stop_buffer":      0.001,
-    "min_stop_pct":     0.002,           # стоп <0.2% — слишком плотный, выбивается шумом
-    "max_stop_pct":     0.004,           # стоп >0.4% — WR=0% на данных (0.4-0.5% убыточны)
+    "min_stop_pct":     0.006,           # стоп <0.6% — комиссия съедает >33% риска
+    "max_stop_pct":     0.03,            # стоп >3% — слишком широкий для 5м
     "bad_hours":        [14, 21, 22],    # WR 7-9% — систематически плохие часы UTC
     "max_wait_bars":    10,
     "btc_ema_period":   50,
@@ -782,11 +782,6 @@ def run_cycle(exchange, journal, cfg):
                 if diff > cfg["max_entry_miss"]:
                     continue
 
-                # Фильтр объёма — берём сигнал только если текущий объём выше среднего
-                last_vol = df.iloc[-2]["vol_ratio"] if "vol_ratio" in df.columns else 1.0
-                if last_vol < 1.2:
-                    continue  # объём слабый — пропускаем
-
                 # ML фильтр — СНАЧАЛА проверяем, потом добавляем
                 current_hour = datetime.now().hour
                 ml_pass, ml_prob = ml_filter_bot1(
@@ -826,7 +821,6 @@ def run_cycle(exchange, journal, cfg):
                     "regime":      market_regime,
                     "regime_conf": regime_conf,
                     "fibo_used":   fibo_used,
-                    # Признаки качества сигнала
                     "body_ratio":       sig.get("body_ratio", 0),
                     "impulse_strength": sig.get("impulse_strength", 0),
                     "consec_candles":   sig.get("consec_candles", 0),

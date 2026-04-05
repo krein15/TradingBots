@@ -26,25 +26,27 @@ import numpy as np
 from datetime import datetime
 
 CONFIG = {
-    "timeframes":       ["15m", "1h"],
+    "timeframes":       ["1h", "4h"],       # 15m убран — 12/13 проигрыши (узкие каналы = шум)
     "candles":          150,
     "vol_period":       20,
     "atr_period":       14,
-    "consol_bars":      6,         # свечей консолидации (было 10 — стоп слишком большой)
-    "atr_squeeze":      1.0,       # ATR < 100% от среднего = сжатие (было 0.9 — слишком строго)
+    "consol_bars":      10,         # свечей консолидации (1ч×10=10ч, 4ч×10=40ч)
+    "atr_squeeze":      1.0,       # ATR < 100% от среднего = сжатие
     "breakout_vol":     1.5,       # объём на пробое
     "min_breakout_pct": 0.003,     # минимальный пробой 0.3%
-    "max_entry_miss":   0.005,     # цена не ушла более 0.5% от входа
+    "min_channel_pct":  0.03,      # мин. ширина канала 3% (отсекает шум)
+    "max_channel_pct":  0.10,      # макс. ширина канала 10% (чтобы RR 1:5 реалистичен)
+    "max_entry_miss":   0.007,     # цена не ушла более 0.7% от входа (шире для 1ч)
     "min_usdt_vol":     2_000_000,
-    "rr":               3.0,
+    "rr":               5.0,       # RR 1:5 (было 1:3)
     "commission":       0.001,
     "buf":              0.001,
-    "max_wait":         5,
+    "max_wait":         10,        # 10 циклов × 30мин = 5 часов ожидания (было 5×15=75мин)
     "deposit":          50.0,
     "risk_pct":         0.05,
     "max_trades":       4,
-    "cooldown_h":       2,
-    "interval_min":     15,
+    "cooldown_h":       3,         # 3ч кулдаун (дольше для старших ТФ)
+    "interval_min":     30,        # сканирование раз в 30 мин (было 15)
     "journal":          "breakout_journal.json",
     "logfile":          "breakout_log.txt",
 }
@@ -173,6 +175,15 @@ def find_signals(df, cfg):
     if consol_range <= 0:
         return signals
 
+    # Фильтр ширины канала — ключевой для качества пробоя
+    # Узкий канал (<3%) = шум, пробой ложный
+    # Широкий канал (>10%) = RR 1:5 нереалистичен (нужен ход 50%+)
+    channel_pct = consol_range / consol_low
+    if channel_pct < cfg.get("min_channel_pct", 0.03):
+        return signals  # канал слишком узкий — ложный пробой
+    if channel_pct > cfg.get("max_channel_pct", 0.10):
+        return signals  # канал слишком широкий — TP слишком далеко
+
     vol_now = last["vol_ratio"]
     if vol_now < cfg["breakout_vol"]:
         return signals  # нет объёма
@@ -201,6 +212,7 @@ def find_signals(df, cfg):
                 "consol_high":   round(consol_high, 6),
                 "consol_low":    round(consol_low, 6),
                 "consol_bars":   n,
+                "channel_pct":   round(channel_pct * 100, 2),
                 "atr_ratio":     round(atr_last/atr_mean, 2),
                 "vol":           round(vol_now, 2),
                 "rr":            round(risk * rr / risk, 2),
@@ -224,6 +236,7 @@ def find_signals(df, cfg):
                     "consol_high":   round(consol_high, 6),
                     "consol_low":    round(consol_low, 6),
                     "consol_bars":   n,
+                    "channel_pct":   round(channel_pct * 100, 2),
                     "atr_ratio":     round(atr_last/atr_mean, 2),
                     "vol":           round(vol_now, 2),
                     "rr":            rr,
@@ -350,6 +363,7 @@ def run_cycle(ex, journal, cfg):
                 "stop":sig["stop"],"take":sig["take"],
                 "type":sig["type"],"vol":sig["vol"],
                 "atr_ratio":sig["atr_ratio"],
+                "channel_pct":sig.get("channel_pct",0),
                 "rr":sig["rr"],"added":now,"waited":0,
             })
             existing.add(key)
@@ -357,7 +371,8 @@ def run_cycle(ex, journal, cfg):
             new_sigs += 1
             d_ru = "ЛОНГ" if sig["dir"]==1 else "ШОРТ"
             log(f"➕ {sym} [{tf}] {d_ru} [{sig['type']}] "
-                f"ATR_ratio={sig['atr_ratio']} vol={sig['vol']}x "
+                f"канал={sig.get('channel_pct',0)}% ATR={sig['atr_ratio']} "
+                f"vol={sig['vol']}x "
                 f"вход={sig['entry']} стоп={sig['stop']} "
                 f"тейк={sig['take']}", cfg)
 
@@ -408,9 +423,10 @@ def main():
         print(f"[+] ${old:.2f} → ${cfg['deposit']:.2f}"); return
 
     print("="*60)
-    print(f"  🚀 БОТ #4 v2 — BREAKOUT")
+    print(f"  🚀 БОТ #4 v3 — BREAKOUT")
     print(f"  Стратегия: ATR squeeze + пробой с объёмом")
     print(f"  TF: {', '.join(cfg['timeframes'])}  RR 1:{cfg['rr']}")
+    print(f"  Канал: {cfg['min_channel_pct']*100:.0f}%-{cfg['max_channel_pct']*100:.0f}%")
     print("="*60)
 
     log("="*50, cfg)
