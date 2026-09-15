@@ -294,8 +294,16 @@ class Engine:
                         still_pending.append(order)
                     continue
 
+                # Место занято — заявка не пропадает, а ждёт дальше,
+                # пока не истечёт её срок. Выбрасывать её здесь
+                # значило бы терять сигналы тем чаще, чем лучше идёт
+                # торговля, и незаметно искажать выборку.
                 if len(self.positions) >= self.max_open:
                     self.counters["skip_max_open"] += 1
+                    if order.bars_waited < self.max_wait_bars:
+                        still_pending.append(order)
+                    else:
+                        self.counters["expired"] += 1
                     continue
 
                 qty, notional, capped = self._size(price, order.stop)
