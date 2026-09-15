@@ -56,6 +56,31 @@ def adx(df, period=14):
 
 
 # ── Упаковка сигналов ─────────────────────────────────────────
+class Signals:
+    """
+    Обёртка над массивами сигналов.
+
+    Хранить numpy-массивы прямо в df.attrs нельзя: pandas при
+    некоторых операциях (например pd.concat) сравнивает attrs через
+    ==, а сравнение массивов даёт массив, и всё падает на
+    "truth value is ambiguous". Обёртка сравнивается по
+    идентичности, поэтому проверка возвращает обычный bool.
+    """
+
+    __slots__ = ("dir", "entry", "stop", "take", "type")
+
+    def __init__(self, direction, entry, stop, take, type_name):
+        self.dir = direction
+        self.entry = entry
+        self.stop = stop
+        self.take = take
+        self.type = type_name
+
+    def __getitem__(self, key):
+        return getattr(self, key)
+
+
+
 def _attach(df, direction, entry, stop, take, type_name):
     """
     Кладём сигналы в df.attrs numpy-массивами.
@@ -77,8 +102,7 @@ def _attach(df, direction, entry, stop, take, type_name):
     bad |= (entry <= 0) | (stop <= 0) | (take <= 0)
     direction = np.where(bad, 0, direction).astype("int8")
 
-    df.attrs["sig"] = {"dir": direction, "entry": entry,
-                       "stop": stop, "take": take, "type": type_name}
+    df.attrs["sig"] = Signals(direction, entry, stop, take, type_name)
     return df
 
 
