@@ -245,16 +245,42 @@ def get_exchange():
     })
 
 
+STABLE_BASES = {"USDC", "FDUSD", "TUSD", "BUSD", "DAI", "USDD",
+                "USDP", "PYUSD", "EURT", "EURS", "USDE", "USDS",
+                "USD1", "RLUSD", "XAUT", "PAXG"}
+
+
 def get_symbols(exchange, min_vol):
+    """
+    Ликвидные пары к USDT, отсортированные по обороту.
+
+    Bitget листит 1178 токенизированных акций (RNVDA = NVIDIA,
+    RQQQ = ETF QQQ, RTSLA = Tesla) против 513 криптовалютных пар,
+    и по обороту акции занимают ВЕСЬ топ. Без фильтра бот брал
+    первые 80 по объёму — то есть торговал акциями, а не криптой,
+    хотя вся стратегия и статистика строились на крипторынке.
+    Отличаются они полем areaSymbol в описании рынка.
+    """
     try:
         tickers = exchange.fetch_tickers()
     except Exception:
         return []
+
+    try:
+        markets = exchange.load_markets()
+    except Exception:
+        markets = {}
+
     symbols = []
     for s, t in tickers.items():
         if not s.endswith("/USDT"): continue
         if ":" in s: continue          # фьючерсы Bitget вида BTC/USDT:USDT
         if s in ("BTC/USDT",): continue
+        # Стейблкоины: USDC/USDT почти не движется, её "пробои" —
+        # шум на третьем знаке, а в топ по обороту она попадает всегда
+        if s.split("/")[0].upper() in STABLE_BASES: continue
+        info = (markets.get(s) or {}).get("info", {})
+        if info.get("areaSymbol") == "yes": continue   # токенизированная акция
         vol = t.get("quoteVolume") or 0
         if vol >= min_vol:
             symbols.append((s, vol))
