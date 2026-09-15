@@ -20,6 +20,21 @@ paper_trading_meanrev.py
 
 import sys, time, os, json
 import ccxt
+
+# Консоль Windows по умолчанию не UTF-8 (cp866/cp1251), а логи ботов
+# содержат эмодзи — print() на них падал с UnicodeEncodeError и ронял
+# весь цикл. Переключаем поток вывода явно.
+try:
+    if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
+
+# Корень проекта в путях импорта — чтобы видеть config.py / shared_state.py
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from shared_state import read_regime
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -43,6 +58,7 @@ CONFIG = {
     "max_wait":         8,
     "deposit":          50.0,
     "risk_pct":         0.05,
+    "auto_refill":      False,  # слитый депозит не восстанавливаем молча
     "max_trades":       5,
     "cooldown_h":       2,
     "interval_min":     10,
@@ -233,14 +249,24 @@ def run_cycle(ex, journal, cfg):
     comm    = cfg["commission"]
     journal["cycles"] = journal.get("cycles", 0) + 1
 
-    # Автопополнение
-    if 0 < balance < journal["deposit"] * cfg["risk_pct"]:
+    # Депозит кончился — баланса не хватает даже на одну сделку.
+    # Раньше баланс молча возвращался к стартовому: эквити-кривая
+    # рвалась, просадка не считалась, восемь сливов подряд выглядели
+    # как одна просадка. Теперь тест на этом честно останавливается.
+    broke = balance < journal["deposit"] * cfg["risk_pct"]
+    if broke and cfg.get("auto_refill", False):
         old_bal = balance
         balance = journal["deposit"]
         journal["balance"] = balance
         journal.setdefault("refills", []).append(
-            {"date": now, "from": round(old_bal,4), "to": balance})
-        log(f"💰 АВТОПОПОЛНЕНИЕ ${old_bal:.2f} → ${balance:.2f}", cfg)
+            {"date": now, "from": round(old_bal, 4), "to": balance})
+        log(f"💰 ПОПОЛНЕНИЕ ${old_bal:.2f} → ${balance:.2f} "
+            f"(всего: {len(journal['refills'])})", cfg)
+        broke = False
+    elif broke:
+        log(f"🛑 ДЕПОЗИТ СЛИТ: ${balance:.2f}, на сделку нужно "
+            f"${journal['deposit'] * cfg['risk_pct']:.2f}. "
+            f"Новые входы остановлены, открытые позиции доводим.", cfg)
 
     # Pending
     new_pending = []
@@ -297,6 +323,12 @@ def run_cycle(ex, journal, cfg):
                 "vol": pos.get("vol",0),
                 "regime": pos.get("regime", "?"),
                 "regime_conf": pos.get("regime_conf", 0),
+                # Нужно для ML: время ВХОДА (а не выхода) и уровни.
+                # Без stop коллектор выводил риск из реализованного
+                # PnL — то есть из ответа, который модель должна
+                # предсказывать.
+                "opened": pos.get("opened", ""),
+                "stop": round(stop, 6), "take": round(take, 6),
                 "pnl": round(pnl,4), "result": result,
                 "balance": round(balance,4), "closed": now,
             })
@@ -312,7 +344,7 @@ def run_cycle(ex, journal, cfg):
 
     # Новые сигналы
     open_cnt = len(journal["open"]) + len(journal["pending"])
-    if open_cnt >= cfg["max_trades"]:
+    if open_cnt >= cfg["max_trades"] or broke:
         return journal, 0
 
     existing = set(f"{p['symbol']}_{p['dir']}"
@@ -341,14 +373,9 @@ def run_cycle(ex, journal, cfg):
             key = f"{sym}_{sig['dir']}"
             if key in existing: continue
             # Читаем текущий режим рынка
-            regime_info = {}
-            try:
-                import json as _json
-                with open("C:\\TradingBots\\shared_state.json") as _f:
-                    _s = _json.load(_f)
-                regime_info = {"regime": _s.get("regime","?"), "regime_conf": _s.get("confidence",0)}
-            except Exception:
-                pass
+            _regime, _regime_conf = read_regime()
+            regime_info = {"regime": _regime,
+                           "regime_conf": _regime_conf}
 
             journal["pending"].append({
                 "symbol": sym, "tf": tf,

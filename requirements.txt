@@ -1,0 +1,9 @@
+# Зависимости проекта. Установка:
+#   python -m venv .venv
+#   .venv\Scripts\activate
+#   pip install -r requirements.txt
+
+ccxt>=4.5            # доступ к биржам (Binance, Bitget)
+pandas>=2.2          # свечи и индикаторы
+numpy>=2.0           # численные расчёты
+scikit-learn>=1.5    # ML-фильтры (Random Forest)

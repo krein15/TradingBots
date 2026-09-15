@@ -19,6 +19,18 @@ ML мета-модель — определяет режим рынка и
 """
 
 import ccxt
+import sys
+
+# Консоль Windows по умолчанию не UTF-8 (cp866/cp1251), а логи ботов
+# содержат эмодзи — print() на них падал с UnicodeEncodeError и ронял
+# весь цикл. Переключаем поток вывода явно.
+try:
+    if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -27,8 +39,11 @@ import json
 import os
 
 # ── Пути к файлам состояния ──────────────────────────────────
-SHARED_STATE_PATH  = "C:\\TradingBots\\shared_state.json"
-REGIME_HISTORY_PATH = "C:\\TradingBots\\ML\\regime_history.jsonl"
+from config import (SHARED_STATE, REGIME_HISTORY,
+                    SHARED_STATE_MAX_AGE_MIN)
+
+SHARED_STATE_PATH   = str(SHARED_STATE)
+REGIME_HISTORY_PATH = str(REGIME_HISTORY)
 
 
 def save_regime(regime, confidence, details):
@@ -88,7 +103,7 @@ def read_regime():
         # Проверяем свежесть — не старше 60 минут
         updated = datetime.fromisoformat(state["updated_at"])
         age_min = (datetime.now() - updated).total_seconds() / 60
-        if age_min > 60:
+        if age_min > SHARED_STATE_MAX_AGE_MIN:
             return None  # данные устарели
         return state
     except Exception:

@@ -21,6 +21,17 @@ paper_trading_breakout.py
 
 import sys, time, os, json
 import ccxt
+
+# Консоль Windows по умолчанию не UTF-8 (cp866/cp1251), а логи ботов
+# содержат эмодзи — print() на них падал с UnicodeEncodeError и ронял
+# весь цикл. Переключаем поток вывода явно.
+try:
+    if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -44,6 +55,7 @@ CONFIG = {
     "max_wait":         10,        # 10 циклов × 30мин = 5 часов ожидания (было 5×15=75мин)
     "deposit":          50.0,
     "risk_pct":         0.05,
+    "auto_refill":      False,  # слитый депозит не восстанавливаем молча
     "max_trades":       4,
     "cooldown_h":       3,         # 3ч кулдаун (дольше для старших ТФ)
     "interval_min":     30,        # сканирование раз в 30 мин (было 15)
@@ -251,13 +263,24 @@ def run_cycle(ex, journal, cfg):
     comm    = cfg["commission"]
     journal["cycles"] = journal.get("cycles", 0) + 1
 
-    if 0 < balance < journal["deposit"] * cfg["risk_pct"]:
+    # Депозит кончился — баланса не хватает даже на одну сделку.
+    # Раньше баланс молча возвращался к стартовому: эквити-кривая
+    # рвалась, просадка не считалась, восемь сливов подряд выглядели
+    # как одна просадка. Теперь тест на этом честно останавливается.
+    broke = balance < journal["deposit"] * cfg["risk_pct"]
+    if broke and cfg.get("auto_refill", False):
         old_bal = balance
         balance = journal["deposit"]
         journal["balance"] = balance
-        journal.setdefault("refills",[]).append(
-            {"date":now,"from":round(old_bal,4),"to":balance})
-        log(f"💰 АВТОПОПОЛНЕНИЕ ${old_bal:.2f} → ${balance:.2f}", cfg)
+        journal.setdefault("refills", []).append(
+            {"date": now, "from": round(old_bal, 4), "to": balance})
+        log(f"💰 ПОПОЛНЕНИЕ ${old_bal:.2f} → ${balance:.2f} "
+            f"(всего: {len(journal['refills'])})", cfg)
+        broke = False
+    elif broke:
+        log(f"🛑 ДЕПОЗИТ СЛИТ: ${balance:.2f}, на сделку нужно "
+            f"${journal['deposit'] * cfg['risk_pct']:.2f}. "
+            f"Новые входы остановлены, открытые позиции доводим.", cfg)
 
     new_pending = []
     new_open    = list(journal["open"])
@@ -309,6 +332,12 @@ def run_cycle(ex, journal, cfg):
                 "entry":round(entry,6),"exit":round(exit_p,6),
                 "vol":pos.get("vol",0),
                 "atr_ratio":pos.get("atr_ratio",0),
+                # Нужно для ML: время ВХОДА (а не выхода) и уровни.
+                # Без stop коллектор выводил риск из реализованного
+                # PnL — то есть из ответа, который модель должна
+                # предсказывать.
+                "opened": pos.get("opened", ""),
+                "stop": round(stop, 6), "take": round(take, 6),
                 "pnl":round(pnl,4),"result":result,
                 "balance":round(balance,4),"closed":now,
             })
@@ -323,7 +352,7 @@ def run_cycle(ex, journal, cfg):
     journal["balance"] = round(balance,4)
 
     open_cnt = len(journal["open"]) + len(journal["pending"])
-    if open_cnt >= cfg["max_trades"]:
+    if open_cnt >= cfg["max_trades"] or broke:
         return journal, 0
 
     # BTC тренд

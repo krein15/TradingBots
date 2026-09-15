@@ -14,6 +14,21 @@ paper_trading_auto.py
 
 import sys, time, os, json
 import ccxt
+
+# Консоль Windows по умолчанию не UTF-8 (cp866/cp1251), а логи ботов
+# содержат эмодзи — print() на них падал с UnicodeEncodeError и ронял
+# весь цикл. Переключаем поток вывода явно.
+try:
+    if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
+
+# Корень проекта в путях импорта — чтобы видеть config.py / shared_state.py
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from shared_state import read_regime
 import pickle
 try:
     from sklearn.ensemble import RandomForestClassifier
@@ -76,6 +91,7 @@ CONFIG = {
     "btc_neutral_zone": 0.01,
     "initial_deposit":  50.0,
     "risk_pct":         0.05,
+    "auto_refill":      False,   # слитый депозит не восстанавливаем молча
     "max_open_trades":  5,           # увеличено с 3 до 5
     "require_confirmation": True,    # монета должна быть сильнее/слабее BTC
     "confirmation_period":  20,      # свечей для сравнения с BTC
@@ -356,21 +372,11 @@ def add_indicators(df, cfg):
 
 def read_market_regime():
     """
-    Читаем текущий режим из shared_state.json.
-    SIDEWAYS / ?  → fibo_entry 23.6%
-    TREND_*       → fibo_trend  5%
+    Текущий режим рынка из shared_state.json.
+    SIDEWAYS / "?" → fibo_entry 23.6%,  TREND_* → fibo_trend 5%.
+    Протухшие данные → ("?", 0), см. shared_state.py.
     """
-    try:
-        import json as _j
-        with open("C:\\TradingBots\\shared_state.json") as f:
-            s = _j.load(f)
-        from datetime import datetime as _dt
-        updated = _dt.fromisoformat(s.get("updated_at", "2000-01-01"))
-        if (_dt.now() - updated).total_seconds() / 60 > 90:
-            return "?", 0  # данные устарели
-        return s.get("regime", "?"), s.get("confidence", 0)
-    except Exception:
-        return "?", 0
+    return read_regime()
 
 
 def get_coin_trend(df_1h):
@@ -561,29 +567,27 @@ def run_cycle(exchange, journal, cfg):
     balance = journal["balance"]
     comm    = cfg["commission"]
 
-    # Автопополнение — если баланс упал ниже минимума для входа
-    min_trade = cfg["initial_deposit"] * cfg["risk_pct"]
-    if balance < min_trade and balance > 0:
+    # Депозит кончился — баланса не хватает даже на одну сделку.
+    # Здесь было ДВА перекрывающихся блока автопополнения, причём
+    # первый писал в journal["refills"] список, а второй прибавлял
+    # к нему единицу как к числу — сработай они подряд, был бы
+    # TypeError. И главное: молчаливый возврат баланса к стартовым
+    # $50 рвал эквити-кривую, поэтому "PnL -$440 при депозите $50"
+    # означал восемь полных сливов, а выглядел как одна просадка.
+    broke = balance < cfg["initial_deposit"] * cfg["risk_pct"]
+    if broke and cfg.get("auto_refill", False):
         old_bal = balance
-        journal["balance"] = cfg["initial_deposit"]
         balance = cfg["initial_deposit"]
-        journal.setdefault("refills", []).append({
-            "date": now,
-            "from": round(old_bal, 4),
-            "to":   cfg["initial_deposit"],
-        })
-        log(f"💰 АВТОПОПОЛНЕНИЕ: ${old_bal:.2f} → ${cfg['initial_deposit']:.2f} "
-            f"(пополнений всего: {len(journal['refills'])})", cfg)
-
-    # Автопополнение если баланс упал ниже 10% от депозита
-    min_balance = cfg["initial_deposit"] * 0.1
-    if balance <= min_balance and len(journal["open"]) == 0:
-        old_bal = balance
-        journal["balance"] = cfg["initial_deposit"]
-        balance = cfg["initial_deposit"]
-        journal["refills"] = journal.get("refills", 0) + 1
-        print(f"  💰 АВТОПОПОЛНЕНИЕ #{journal['refills']}: "
-              f"${old_bal:.2f} → ${balance:.2f}")
+        journal["balance"] = balance
+        journal.setdefault("refills", []).append(
+            {"date": now, "from": round(old_bal, 4), "to": balance})
+        log(f"💰 ПОПОЛНЕНИЕ ${old_bal:.2f} → ${balance:.2f} "
+            f"(всего: {len(journal['refills'])})", cfg)
+        broke = False
+    elif broke:
+        log(f"🛑 ДЕПОЗИТ СЛИТ: ${balance:.2f}, на сделку нужно "
+            f"${cfg['initial_deposit'] * cfg['risk_pct']:.2f}. "
+            f"Новые входы остановлены, открытые позиции доводим.", cfg)
 
     # ── 1. Обновляем pending ──────────────────
     updated_pending = []
@@ -671,16 +675,10 @@ def run_cycle(exchange, journal, cfg):
 
     journal["open"]    = still_open
     journal["pending"] = updated_pending
-    # Автопополнение если баланс упал ниже минимума
-    min_balance = cfg["initial_deposit"] * 0.1  # 10% от депозита
-    if balance <= min_balance:
-        old_bal  = balance
-        balance  = cfg["initial_deposit"]
-        refills  = journal.get("refill_count", 0) + 1
-        journal["refill_count"] = refills
-        log(f"💰 АВТОПОПОЛНЕНИЕ #{refills}  "
-            f"${old_bal:.2f} → ${balance:.2f}  "
-            f"(баланс упал ниже ${min_balance:.2f})", cfg)
+    # Баланс мог измениться, пока закрывались позиции — пересчитываем.
+    # Пополнения здесь больше нет: оно было третьей копией той же
+    # логики и с третьим по счёту счётчиком (refill_count).
+    broke = broke or balance < cfg["initial_deposit"] * cfg["risk_pct"]
 
     journal["balance"] = round(balance, 4)
 
@@ -695,7 +693,7 @@ def run_cycle(exchange, journal, cfg):
         log(f"⏸️  Плохой час {current_hour}:00 UTC (WR<10%) — пропускаем сканирование", cfg)
         return journal, 0
 
-    if open_count < cfg["max_open_trades"]:
+    if open_count < cfg["max_open_trades"] and not broke:
         existing = set()
         for p in journal["pending"] + journal["open"]:
             existing.add(f"{p['symbol']}_{p['dir']}")

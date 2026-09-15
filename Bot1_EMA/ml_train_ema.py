@@ -20,9 +20,12 @@ from sklearn.calibration import CalibratedClassifierCV
 import pickle, os, warnings
 warnings.filterwarnings("ignore")
 
-# Путь к датасету
-DATASET = os.path.join("C:\\TradingBots", "ML", "ml_dataset.csv")
-MODEL   = os.path.join("C:\\TradingBots", "Bot1_EMA", "ml_model_ema.pkl")
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import ML_DATASET, MODELS
+
+DATASET = str(ML_DATASET)
+MODEL   = str(MODELS["EMA"])
 
 def train():
     if not os.path.exists(DATASET):
@@ -32,6 +35,15 @@ def train():
 
     df  = pd.read_csv(DATASET)
     ema = df[df["bot"] == "EMA"].copy()
+
+    # risk_pct — главный признак модели. Сделки без сохранённого
+    # стопа дают недостоверный риск, обучаться на них нельзя.
+    if "has_stop" in ema.columns:
+        before = len(ema)
+        ema = ema[ema["has_stop"] == 1].copy()
+        if before != len(ema):
+            print(f"[i] Отброшено {before - len(ema)} сделок без стопа "
+                  f"(risk_pct недостоверен)")
     print(f"EMA сделок: {len(ema)}  WR={round(ema["target"].mean()*100,1)}%")
 
     if len(ema) < 50:

@@ -22,31 +22,29 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 
-# ── Пути к журналам ───────────────────────────────────────────
-JOURNALS = [
-    {
-        "name": "EMA",
-        "path": "C:\\TradingBots\\Bot1_EMA\\paper_journal.json",
-    },
-    {
-        "name": "MeanRev",
-        "path": "C:\\TradingBots\\Bot2_MeanRev\\meanrev_journal.json",
-    },
-    {
-        "name": "Funding",
-        "path": "C:\\TradingBots\\Bot3_Funding\\funding_journal.json",
-    },
-    {
-        "name": "Breakout",
-        "path": "C:\\TradingBots\\Bot4_Breakout\\breakout_journal.json",
-    },
-]
+# ── Пути (см. config.py в корне проекта) ──────────────────────
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import (ML_DIR, ML_DATASET, ML_SUMMARY,
+                    REGIME_HISTORY, SHARED_STATE, JOURNALS as JOURNAL_PATHS)
 
-OUTPUT_DIR          = "C:\\TradingBots\\ML"
-REGIME_HISTORY_PATH = "C:\\TradingBots\\ML\\regime_history.jsonl"
-SHARED_STATE_PATH   = "C:\\TradingBots\\shared_state.json"
+JOURNALS = [{"name": name, "path": str(path)}
+            for name, path in JOURNAL_PATHS.items()]
 
-INITIAL_DEPOSIT = 50.0  # для расчёта risk_pct когда stop не сохранён
+OUTPUT_DIR          = str(ML_DIR)
+REGIME_HISTORY_PATH = str(REGIME_HISTORY)
+SHARED_STATE_PATH   = str(SHARED_STATE)
+
+INITIAL_DEPOSIT = 50.0  # запасной депозит, если в журнале его нет
+
+
+def pause(msg="Нажми Enter..."):
+    """Пауза только в интерактивном запуске — иначе EOFError."""
+    try:
+        if sys.stdin is not None and sys.stdin.isatty():
+            input(msg)
+    except Exception:
+        pass
 
 
 def load_regime_history():
@@ -67,16 +65,16 @@ def load_regime_history():
     return records
 
 
-def get_regime_at(closed_at, regime_records):
+def get_regime_at(ts, regime_records):
     """
-    Находим режим рынка в момент закрытия сделки.
-    Берём последнюю запись режима ДО closed_at.
+    Режим рынка на момент времени ts (время ВХОДА в сделку).
+    Берём последнюю запись режима ДО ts.
     """
-    if not regime_records or not closed_at:
+    if not regime_records or not ts:
         return "?", 0
     best = None
     for r in regime_records:
-        if r["ts"] <= closed_at:
+        if r["ts"] <= ts:
             best = r
         else:
             break
@@ -93,10 +91,18 @@ def load_journal(bot):
     return None
 
 
-def parse_time(closed_at):
-    """Разбираем дату и возвращаем временные признаки."""
+def parse_time(opened_at):
+    """
+    Временные признаки момента ВХОДА в сделку.
+
+    Раньше сюда передавалось время ЗАКРЫТИЯ — признак, которого в
+    момент входа ещё не существует. Модель училась на hour/is_london
+    от закрытия, а на бою ml_filter подставлял datetime.now(), то
+    есть время открытия. Классическая утечка будущего плюс
+    рассинхрон обучения и применения.
+    """
     try:
-        dt = datetime.fromisoformat(closed_at)
+        dt = datetime.fromisoformat(opened_at)
         hour        = dt.hour
         day_of_week = dt.weekday()
         is_weekend  = 1 if day_of_week >= 5 else 0
@@ -118,7 +124,10 @@ def extract_features(trade, bot_name, deposit, regime_records=None):
     """
     # ── Время ──────────────────────────────────────────────────
     closed_at = trade.get("closed_at") or trade.get("closed", "")
-    hour, dow, is_we, is_night, is_lon, is_ny, is_asia = parse_time(closed_at)
+    # Момент входа. Старые сделки его не сохраняли — там честнее
+    # отдать нули, чем подставить время закрытия.
+    opened_at = trade.get("opened_at") or trade.get("opened", "")
+    hour, dow, is_we, is_night, is_lon, is_ny, is_asia = parse_time(opened_at)
 
     # ── Цены ───────────────────────────────────────────────────
     entry  = float(trade.get("entry", trade.get("entry_limit", 0)))
@@ -132,18 +141,16 @@ def extract_features(trade, bot_name, deposit, regime_records=None):
 
     # ── Risk/Reward ─────────────────────────────────────────────
     if stop > 0 and entry > 0:
-        # Старый формат — есть stop/take
         risk   = abs(entry - stop)
         reward = abs(take - entry)
     else:
-        # Новый формат — считаем из реального PnL
-        # risk_pct = |pnl| / deposit (примерно, т.к. риск фиксирован 5%)
-        risk   = abs(pnl) / deposit * entry if deposit > 0 and entry > 0 else 0
-        # rr берём из конфига бота по типу
-        sig_type = trade.get("type", "")
-        rr_map   = {"MR": 2.0, "FR": 3.0, "BO": 3.0, "EMA": 4.0}
-        rr_guess = next((v for k, v in rr_map.items() if k in sig_type), 3.0)
-        reward   = risk * rr_guess
+        # Стопа в сделке нет — риск НЕИЗВЕСТЕН.
+        # Раньше здесь стояло risk = abs(pnl) / deposit * entry,
+        # то есть риск вычислялся из реализованного PnL. А risk_pct
+        # — первый признак в списке обучения Bot1. Модель получала
+        # ответ на вход и показывала завышенный AUC.
+        risk   = 0
+        reward = 0
 
     rr_plan  = round(reward / risk, 2) if risk > 0 else 0
     stop_pct = round(risk / entry * 100, 3) if entry > 0 else 0
@@ -191,8 +198,10 @@ def extract_features(trade, bot_name, deposit, regime_records=None):
     # Приоритет: поле из журнала → история режимов → неизвестно
     regime      = trade.get("regime", "?")
     regime_conf = int(trade.get("regime_conf", 0))
-    if regime == "?" and regime_records:
-        regime, regime_conf = get_regime_at(closed_at, regime_records)
+    if regime == "?" and regime_records and opened_at:
+        # По времени ВХОДА. Раньше брался режим на момент закрытия —
+        # та же утечка, что и с часами.
+        regime, regime_conf = get_regime_at(opened_at, regime_records)
 
     return {
         # Идентификаторы
@@ -213,6 +222,8 @@ def extract_features(trade, bot_name, deposit, regime_records=None):
 
         # Риск-менеджмент
         "risk_pct":      stop_pct,
+        "has_stop":      1 if risk > 0 else 0,   # 0 → risk_pct недостоверен
+        "opened_at":     opened_at,
         "reward_pct":    take_pct,
         "rr_planned":    rr_plan,
         "exit_progress": exit_progress,
@@ -308,7 +319,7 @@ def build_dataset():
 
     if not all_rows:
         print("\n[!] Нет данных для датасета")
-        input("Enter...")
+        pause("Enter...")
         return
 
     df = pd.DataFrame(all_rows)
@@ -408,7 +419,7 @@ def build_dataset():
 
     print(f"\n  Загрузи ml_dataset_summary.txt в чат для анализа!")
     print(f"  Минимум для ML: 200+ сделок. Сейчас: {len(df)} сделок.\n")
-    input("Нажми Enter для выхода...")
+    pause("Нажми Enter для выхода...")
 
 
 if __name__ == "__main__":
@@ -418,4 +429,4 @@ if __name__ == "__main__":
         import traceback
         print(f"\nОШИБКА: {e}")
         print(traceback.format_exc())
-        input("\nНажми Enter...")
+        pause("\nНажми Enter...")

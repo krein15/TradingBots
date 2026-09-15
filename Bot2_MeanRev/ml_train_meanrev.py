@@ -22,8 +22,12 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import roc_auc_score
 warnings.filterwarnings('ignore')
 
-DATASET_PATH = "C:\\TradingBots\\ML\\ml_dataset.csv"
-MODEL_PATH   = "C:\\TradingBots\\Bot2_MeanRev\\ml_model_meanrev.pkl"
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import ML_DATASET, MODELS
+
+DATASET_PATH = str(ML_DATASET)
+MODEL_PATH   = str(MODELS["MeanRev"])
 MIN_TRADES   = 60
 
 FEATURES = [

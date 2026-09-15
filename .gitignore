@@ -8,6 +8,7 @@ wyckoff*_journal.json
 # Логи
 *.txt
 !README.txt
+!requirements.txt
 
 # ML модель и данные
 *.pkl
@@ -27,3 +28,7 @@ __pycache__/
 # Windows
 Thumbs.db
 desktop.ini
+
+# Окружение Python
+.venv/
+venv/
