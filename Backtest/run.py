@@ -44,6 +44,16 @@ sys.path.insert(0, str(data.ROOT / "Bot1_EMA"))
 import paper_trading_v2_clean as bot1
 
 
+def bot1_signals(df, i, cfg, btc_trend, btc_chg, regime):
+    """
+    Адаптер к настоящей find_signals бота: она смотрит на последнюю
+    строку переданного кадра, поэтому отдаём срез по текущий бар.
+    Движок передаёт индекс, чтобы стратегии с предрасчётом сигналов
+    не платили за срез на каждом баре.
+    """
+    return bot1.find_signals(df.iloc[:i + 1], cfg, btc_trend, btc_chg, regime)
+
+
 def build_symbol_data(exchange_id, symbols, timeframe, start, end, cfg,
                       exchange=None, verbose=True):
     """Качаем свечи и считаем индикаторы теми же функциями, что и бот."""
@@ -157,7 +167,7 @@ def main():
         print(f"  Прогон: {titles[fm]}")
         t0 = time.time()
         eng = Engine(
-            cfg=cfg, signal_fn=bot1.find_signals,
+            cfg=cfg, signal_fn=bot1_signals,
             deposit=deposit, risk_pct=risk,
             max_open=cfg["max_open_trades"],
             commission=cfg["commission"], slippage=args.slippage,

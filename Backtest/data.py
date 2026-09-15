@@ -102,7 +102,10 @@ def fetch_ohlcv(exchange, symbol, timeframe, since_ms, until_ms,
     step = TF_MS[timeframe]
     rows, cursor = [], since_ms
     errors = 0
-    max_pages = max(4, (until_ms - since_ms) // (step * page_limit) + 8)
+    empty_pages = 0
+    # Сколько пустых окон подряд готовы промотать в поисках листинга
+    max_empty = 200
+    max_pages = max(8, (until_ms - since_ms) // (step * page_limit) * 2 + 16)
     pages = 0
 
     while cursor < until_ms and pages < max_pages:
@@ -120,7 +123,16 @@ def fetch_ohlcv(exchange, symbol, timeframe, since_ms, until_ms,
             continue
 
         if not batch:
-            break
+            # Пусто — это чаще всего участок ДО листинга монеты, а не
+            # конец истории. Раньше здесь стоял break, и символы вроде
+            # ZEC (листинг 2026) или HYPE (2025) молча возвращали ноль
+            # свечей при запросе с 2023 года. Промотаем окно вперёд.
+            empty_pages += 1
+            if empty_pages > max_empty:
+                break
+            cursor += step * page_limit
+            continue
+        empty_pages = 0
 
         last_raw = batch[-1][0]
         batch = [c for c in batch if since_ms <= c[0] < until_ms]

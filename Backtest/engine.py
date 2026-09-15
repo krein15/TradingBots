@@ -65,6 +65,8 @@ class Position:
     notional: float
     capped: bool = False
     bars_held: int = 0
+    best_price: float = 0.0   # экстремум в нашу сторону, для трейлинга
+    exit_kind: str = "stop"   # станет "trail", когда стоп подтянут
 
 
 @dataclass
@@ -88,6 +90,7 @@ class Trade:
     balance_after: float
     bars_held: int
     capped: bool
+    exit_reason: str = "stop"
 
 
 class Engine:
@@ -105,7 +108,8 @@ class Engine:
                  fill_model=FILL_LIMIT, touch_tolerance=0.003,
                  max_wait_bars=10, cooldown_minutes=120,
                  bad_hours=(), max_leverage=1.0,
-                 signal_max_age_bars=3):
+                 signal_max_age_bars=3,
+                 trail_atr=None, max_hold_bars=None):
         self.cfg = cfg
         self.signal_fn = signal_fn
         self.deposit = deposit
@@ -120,6 +124,14 @@ class Engine:
         self.bad_hours = set(bad_hours)
         self.max_leverage = max_leverage
         self.signal_max_age_bars = signal_max_age_bars
+        # Трейлинг-стоп в единицах ATR: без него трендовую
+        # стратегию не проверить — она живёт тем, что даёт
+        # прибыли тянуться, а не упирается в фиксированный тейк.
+        self.trail_atr = trail_atr
+        # Принудительный выход по времени: позиция не должна
+        # занимать лимит неделями, как было в первом прогоне
+        # (максимум 2780 свечей в одной сделке).
+        self.max_hold_bars = max_hold_bars
 
         self.balance = deposit
         self.trades = []
@@ -162,9 +174,17 @@ class Engine:
         slip = level * self.slippage
         return level - slip if direction == 1 else level + slip
 
-    def _close(self, pos, level, is_stop, ts):
+    def _close(self, pos, level, reason, ts):
+        """
+        reason: stop | take | trail | time.
+        Тейк — лимитная заявка, исполняется по уровню. Всё остальное
+        рыночное и проскальзывает против нас.
+        Результат считаем по знаку PnL, а не по причине выхода: при
+        трейлинге и выходе по времени сделка может закрыться в плюс,
+        и записывать её как LOSS было бы неверно.
+        """
         d = pos.order.direction
-        exit_price = self._exit_price(d, level, is_stop)
+        exit_price = level if reason == "take" else self._exit_price(d, level, True)
         gross = (exit_price - pos.entry_price) * pos.qty * d
         fees = self._fee(pos.notional) + self._fee(exit_price * pos.qty)
         pnl = gross - fees
@@ -178,11 +198,12 @@ class Engine:
             entry_price=pos.entry_price, exit_price=exit_price,
             stop=pos.order.stop, take=pos.order.take,
             qty=pos.qty, notional=pos.notional,
-            result="LOSS" if is_stop else "WIN",
+            result="WIN" if pnl > 0 else "LOSS",
             pnl=pnl, fees=fees, balance_after=self.balance,
             bars_held=pos.bars_held, capped=pos.capped,
+            exit_reason=reason,
         ))
-        if is_stop:
+        if pnl <= 0:
             self.cooldown[pos.order.symbol] = ts + self.cooldown_ms
 
     def _check_exit(self, pos, high, low, ts):
@@ -198,12 +219,34 @@ class Engine:
             hit_stop, hit_take = high >= pos.order.stop, low <= pos.order.take
 
         if hit_stop:
-            self._close(pos, pos.order.stop, True, ts)
+            self._close(pos, pos.order.stop, pos.exit_kind, ts)
             return True
         if hit_take:
-            self._close(pos, pos.order.take, False, ts)
+            self._close(pos, pos.order.take, "take", ts)
             return True
         return False
+
+    def _update_trail(self, pos, high, low, atr):
+        """
+        Подтягиваем стоп за ценой на trail_atr * ATR от достигнутого
+        экстремума. Стоп двигается только в нашу сторону — назад он
+        не откатывается никогда.
+        """
+        if not self.trail_atr or not atr or atr <= 0:
+            return
+        d = pos.order.direction
+        if d == 1:
+            pos.best_price = max(pos.best_price, high)
+            new_stop = pos.best_price - self.trail_atr * atr
+            if new_stop > pos.order.stop:
+                pos.order.stop = new_stop
+                pos.exit_kind = "trail"
+        else:
+            pos.best_price = min(pos.best_price, low)
+            new_stop = pos.best_price + self.trail_atr * atr
+            if new_stop < pos.order.stop:
+                pos.order.stop = new_stop
+                pos.exit_kind = "trail"
 
     # ── Вход ──────────────────────────────────────────────────
     def _try_fill(self, order, o, h, l):
@@ -238,6 +281,8 @@ class Engine:
                 "h": df["high"].to_numpy(dtype="float64"),
                 "l": df["low"].to_numpy(dtype="float64"),
                 "c": df["close"].to_numpy(dtype="float64"),
+                "atr": (df["atr"].to_numpy(dtype="float64")
+                        if "atr" in df.columns else None),
             }
         if not frames:
             return self
@@ -272,8 +317,19 @@ class Engine:
                     continue
                 f = frames[pos.order.symbol]
                 pos.bars_held += 1
-                if not self._check_exit(pos, f["h"][i], f["l"][i], int(ts)):
-                    still_open.append(pos)
+
+                # Трейлинг подтягиваем ДО проверки касаний: стоп,
+                # выставленный по этой же свече, не может быть ею
+                # же и исполнен — иначе получилось бы подглядывание.
+                closed = self._check_exit(pos, f["h"][i], f["l"][i], int(ts))
+                if closed:
+                    continue
+                if self.trail_atr and f["atr"] is not None:
+                    self._update_trail(pos, f["h"][i], f["l"][i], f["atr"][i])
+                if self.max_hold_bars and pos.bars_held >= self.max_hold_bars:
+                    self._close(pos, f["c"][i], "time", int(ts))
+                    continue
+                still_open.append(pos)
             self.positions = still_open
 
             # 2. Заявки — исполнение или истечение срока
@@ -315,7 +371,7 @@ class Engine:
 
                 pos = Position(order=order, qty=qty, entry_price=price,
                                entry_ts=int(ts), notional=notional,
-                               capped=capped)
+                               capped=capped, best_price=price)
                 self.counters["filled"] += 1
 
                 # Позиция могла быть выбита той же свечой, на которой
@@ -367,7 +423,7 @@ class Engine:
                     continue
 
                 f = frames[sym]
-                sigs = self.signal_fn(f["df"].iloc[:i + 1], self.cfg,
+                sigs = self.signal_fn(f["df"], i, self.cfg,
                                       btc_trend, btc_chg, regime)
                 if not sigs:
                     continue
