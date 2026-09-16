@@ -175,8 +175,67 @@ STABLE_BASES = {"USDC", "FDUSD", "TUSD", "BUSD", "DAI", "USDD", "USDP",
 EXCLUDE_BASES = set()
 
 
-def get_symbols(exchange, cfg, allowed=None):
-    """Ликвидные крипто-перпетуалы USDT, отсортированные по обороту."""
+# ─────────────────────────────────────────────────────────────
+#  Зафиксированный список инструментов
+# ─────────────────────────────────────────────────────────────
+# Отобран 16.09.2026 по ДВУМ признакам, и оба объективные:
+#   оборот на перпетуалах Bitget >= $5М в сутки;
+#   не меньше 1800 четырёхчасовых свечей истории (год с лишним),
+#   иначе EMA200 и канал не успевают прогреться.
+# Плюс базовый актив обязан листиться спотом на Binance — это
+# отсекает токенизированные акции и металлы.
+#
+# Чего в отборе НЕТ намеренно: результатов бэктеста. Выбирать монеты
+# по тому, как они отработали на истории, значит подгонять состав
+# под ответ, и форвард-тест перестанет что-либо доказывать.
+#
+# Зачем вообще фиксировать. Динамический список строится по текущим
+# оборотам и дрейфует вместе с рынком. А проверка показала, что край
+# сильно зависит от состава: на 30 случайных наборах по 40 монет
+# медиана на проверочном периоде +0.144R при разбросе 0.105 и
+# диапазоне от -0.089R до +0.386R. С плавающим списком форвард-тест
+# мерил бы удачу состава пополам со стратегией.
+#
+# Обновлять список руками и только осознанно:
+#   python paper_trading_donchian.py refresh-symbols
+# и вставить вывод сюда. Каждое обновление обнуляет чистоту
+# накопленной форвард-статистики, так что без нужды не стоит.
+SYMBOLS = (
+    "BTC/USDT:USDT", "ETH/USDT:USDT", "XRP/USDT:USDT", "SOL/USDT:USDT",
+    "ZEC/USDT:USDT", "LSK/USDT:USDT", "SUI/USDT:USDT", "DOGE/USDT:USDT",
+    "ARB/USDT:USDT", "PEPE/USDT:USDT", "ENA/USDT:USDT", "UNI/USDT:USDT",
+    "ADA/USDT:USDT", "XLM/USDT:USDT", "FIL/USDT:USDT", "LINK/USDT:USDT",
+    "NEAR/USDT:USDT", "VTHO/USDT:USDT", "TRUMP/USDT:USDT", "ONDO/USDT:USDT",
+    "TAO/USDT:USDT", "BNB/USDT:USDT", "WLD/USDT:USDT", "DOT/USDT:USDT",
+    "INJ/USDT:USDT", "PUMP/USDT:USDT", "APT/USDT:USDT", "AVAX/USDT:USDT",
+    "BCH/USDT:USDT", "AAVE/USDT:USDT", "LTC/USDT:USDT", "ASTR/USDT:USDT",
+    "FET/USDT:USDT", "ETHFI/USDT:USDT", "PENGU/USDT:USDT",
+)
+
+
+def active_symbols(exchange, cfg):
+    """
+    Зафиксированный список, очищенный от того, что биржа больше
+    не торгует. Делистинг монеты не должен ронять бота, но и
+    молча подменять состав чем-то новым тоже нельзя — поэтому
+    только убираем, никогда не добавляем.
+    """
+    try:
+        markets = exchange.load_markets()
+    except Exception as e:
+        return [], f"биржа недоступна: {e}"
+    live, gone = [], []
+    for sym in SYMBOLS:
+        m = markets.get(sym)
+        (live if (m and m.get('active')) else gone).append(sym)
+    return live, (f"больше не торгуются: {', '.join(gone)}" if gone else None)
+
+
+def discover_symbols(exchange, cfg, allowed=None):
+    """
+    Динамический подбор по обороту — используется только для
+    режима refresh-symbols, в торговле список зафиксирован.
+    """
     allowed = allowed if allowed is not None else crypto_bases()
     try:
         markets = exchange.load_markets()
@@ -523,13 +582,37 @@ def main():
     ex = get_exchange()
 
     if mode == "symbols":
-        syms, err = get_symbols(ex, cfg)
+        syms, warn = active_symbols(ex, cfg)
+        print(f"Зафиксированный список: {len(SYMBOLS)}, "
+              f"из них торгуются сейчас: {len(syms)}")
+        if warn:
+            print(f"[!] {warn}")
+        for x in syms:
+            print("  ", x)
+        return
+
+    if mode == "refresh-symbols":
+        # Подбирает список заново по текущим оборотам и печатает
+        # его для ручной вставки. Сам ничего не меняет: подмена
+        # состава на ходу обнулила бы чистоту форвард-статистики.
+        fresh, err = discover_symbols(ex, cfg)
         if err:
             print(f"[!] {err}")
             return
-        print(f"Инструментов: {len(syms)}")
-        for s in syms:
-            print("  ", s)
+        added = [x for x in fresh if x not in SYMBOLS]
+        dropped = [x for x in SYMBOLS if x not in fresh]
+        print(f"По текущим оборотам подошло бы {len(fresh)} инструментов.")
+        print(f"  новых: {len(added)}   выпало: {len(dropped)}")
+        if added:
+            print("  добавились бы:", ", ".join(added))
+        if dropped:
+            print("  выпали бы:   ", ", ".join(dropped))
+        print('\n' + "SYMBOLS = (")
+        for x in fresh:
+            print(f'    "{x}",')
+        print(")")
+        print('\n' + "Вставлять в код только осознанно: каждое обновление")
+        print("обнуляет чистоту накопленной форвард-статистики.")
         return
 
     log("=" * 56, cfg, show=False)
@@ -538,28 +621,18 @@ def main():
     log(f"Правила: Дончиан {cfg['channel']} свечей, стоп {cfg['atr_mult']} ATR, "
         f"тейк {cfg['rr']}R, фильтр EMA{cfg['ema']}, ТФ {cfg['timeframe']}", cfg)
 
-    allowed = crypto_bases()
-    log(f"Криптоактивов в белом списке (спот Binance): {len(allowed)}", cfg)
-
-    symbols, err = get_symbols(ex, cfg, allowed)
-    if err:
-        log(f"[!] {err}", cfg)
+    symbols, warn = active_symbols(ex, cfg)
+    if not symbols:
+        log("[!] Не удалось получить список инструментов", cfg)
         return
-    log(f"Инструментов в работе: {len(symbols)} — {', '.join(s.split('/')[0] for s in symbols[:12])}"
+    if warn:
+        log(f"[!] {warn}", cfg)
+    log(f"Список зафиксирован: {len(symbols)} инструментов — "
+        + ", ".join(x.split("/")[0] for x in symbols[:12])
         + (" ..." if len(symbols) > 12 else ""), cfg)
-
-    last_symbol_refresh = time.time()
 
     while True:
         try:
-            # Набор инструментов обновляем раз в сутки
-            if time.time() - last_symbol_refresh > 86400:
-                fresh, err2 = get_symbols(ex, cfg, allowed)
-                if not err2 and fresh:
-                    symbols = fresh
-                    log(f"Список инструментов обновлён: {len(symbols)}", cfg)
-                last_symbol_refresh = time.time()
-
             log(f"--- Цикл #{journal.get('cycles', 0) + 1} ---", cfg)
             opened = run_cycle(ex, journal, cfg, symbols)
             save_journal(journal, cfg)
