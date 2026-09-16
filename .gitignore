@@ -36,3 +36,8 @@ venv/
 # Кэш исторических свечей и результаты прогонов
 Backtest/cache/
 Backtest/*.csv
+
+# Ключи API — никогда в git
+.env
+*.env
+!.env.example

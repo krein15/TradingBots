@@ -73,9 +73,15 @@ CONFIG = {
 
     # ── Деньги ────────────────────────────────────────────────
     "deposit":        50.0,
-    # 5% давали +556% за год, но с просадкой 68% и серией из 11
-    # убытков подряд. 1-2% — то, что можно досидеть.
-    "risk_pct":       0.02,
+    # 5% — осознанный выбор для форвард-теста.
+    # Статистика в R от размера риска не зависит: он масштабирует
+    # кривую баланса, но не матожидание на сделку. Зато на 5%
+    # сразу видно настоящую просадку.
+    # Чего ждать: на 20 случайных наборах монет за год медиана
+    # была $57 из $50, худший исход $2, просадка около -80%, и
+    # 40% наборов закончили год в минусе. Максимальная серия
+    # убытков подряд — 11.
+    "risk_pct":       0.05,
     "max_open":       5,
     "max_leverage":   3.0,     # перпетуалы позволяют, но без фанатизма
     "commission":     0.0006,  # тейкер Bitget futures
@@ -88,6 +94,14 @@ CONFIG = {
 
     # ── Работа ────────────────────────────────────────────────
     "scan_interval_min": 20,
+    # Сигнал действителен, только пока свеча закрылась недавно.
+    # Бэктест входит на открытии СЛЕДУЮЩЕЙ свечи, то есть сразу после
+    # закрытия сигнальной. Без этого ограничения бот при первом
+    # запуске и при каждом перезапуске подхватывал свечу, закрывшуюся
+    # до 4 часов назад, и входил по совсем другой цене. Так и
+    # случилось при первом запуске на 5%: три входа по свече,
+    # закрывшейся 190 минут назад. Порог = интервал опроса + запас.
+    "max_signal_age_min": 30,
     "candles":        400,     # хватает на EMA200 с запасом
     "journal":        os.path.join(HERE, "donchian_journal.json"),
     "logfile":        os.path.join(HERE, "donchian_log.txt"),
@@ -402,8 +416,25 @@ def strategy_params(cfg):
     }
 
 
+def prune_acted(journal, days=10):
+    """Отметки об отработанных сигналах старше N дней не нужны."""
+    acted = journal.get("acted", {})
+    cutoff = datetime.now() - timedelta(days=days)
+    for k in [k for k, v in acted.items()
+              if _safe_dt(v) and _safe_dt(v) < cutoff]:
+        del acted[k]
+
+
+def _safe_dt(iso):
+    try:
+        return datetime.fromisoformat(iso)
+    except Exception:
+        return None
+
+
 def run_cycle(exchange, journal, cfg, symbols):
     journal["cycles"] = journal.get("cycles", 0) + 1
+    prune_acted(journal)
     p = strategy_params(cfg)
 
     # ── 1. Открытые позиции ───────────────────────────────────
@@ -470,6 +501,19 @@ def run_cycle(exchange, journal, cfg, symbols):
             continue
         sig = sigs[0]
 
+        # Возраст сигнала: сколько прошло с ЗАКРЫТИЯ сигнальной свечи
+        signal_ts = int(prepared.timestamp.iloc[i])
+        closed_ms = signal_ts + TF_MS.get(cfg["timeframe"], 14_400_000)
+        age_min = (exchange.milliseconds() - closed_ms) / 60000
+        if age_min > cfg["max_signal_age_min"]:
+            continue                     # устарел — бэктест так не входит
+
+        # Один сигнал — один вход. Без этого перезапуск бота после
+        # закрытия позиции снова открыл бы её по той же свече.
+        acted_key = f"{sym}|{signal_ts}"
+        if acted_key in journal.setdefault("acted", {}):
+            continue
+
         if (sym, sig["dir"]) in busy:
             continue
 
@@ -500,10 +544,12 @@ def run_cycle(exchange, journal, cfg, symbols):
             "atr": round(atr_val, 8),
             "stop_pct": round(risk / entry, 5),
             "opened": datetime.now().isoformat(),
-            "entry_ts": int(prepared.timestamp.iloc[i]),
+            "entry_ts": signal_ts,
+            "signal_age_min": round(age_min, 1),
             "bars_held": 0,
         }
         journal["open"].append(pos)
+        journal["acted"][acted_key] = datetime.now().isoformat()
         busy.add((sym, sig["dir"]))
         opened += 1
         log(f"✅ ОТКРЫТА {sym} {'ЛОНГ' if sig['dir'] == 1 else 'ШОРТ'} "
