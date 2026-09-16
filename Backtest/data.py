@@ -50,6 +50,10 @@ def get_exchange(exchange_id):
                             "options": {"defaultType": "spot"}})
     if exchange_id == "binance":
         return ccxt.binance({"enableRateLimit": True})
+    if exchange_id == "binanceusdm":
+        # Фьючерсы Binance: страница 1500 свечей против 200 у Bitget,
+        # поэтому младшие таймфреймы для исследования качаем отсюда
+        return ccxt.binanceusdm({"enableRateLimit": True})
     raise ValueError(f"неизвестная биржа: {exchange_id}")
 
 
@@ -78,7 +82,7 @@ def write_cache(exchange_id, symbol, timeframe, df):
 # КОНЕЦ окна: запросив limit=1000 от 1 августа, получаешь 200 свечей
 # от 3 августа. Просить у него больше 200 — значит молча потерять
 # начало периода, поэтому размер страницы фиксирован по бирже.
-PAGE_LIMIT = {"bitget": 200, "binance": 1000}
+PAGE_LIMIT = {"bitget": 200, "binance": 1000, "binanceusdm": 1500}
 DEFAULT_PAGE_LIMIT = 200
 
 
