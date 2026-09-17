@@ -66,6 +66,10 @@ class Position:
     capped: bool = False
     bars_held: int = 0
     best_price: float = 0.0   # экстремум в нашу сторону, для трейлинга
+    # Стоп на момент входа. Трейлинг двигает order.stop, а риск сделки —
+    # это расстояние до ИСХОДНОГО стопа. Без этого поля R считался от
+    # подтянутого стопа, и при стопе у цены входа раздувался до +7R.
+    initial_stop: float = 0.0
     exit_kind: str = "stop"   # станет "trail", когда стоп подтянут
 
 
@@ -91,6 +95,7 @@ class Trade:
     bars_held: int
     capped: bool
     exit_reason: str = "stop"
+    initial_stop: float = 0.0   # для расчёта R; stop — финальный уровень
 
 
 class Engine:
@@ -197,6 +202,7 @@ class Engine:
             entry_ts=pos.entry_ts, exit_ts=ts,
             entry_price=pos.entry_price, exit_price=exit_price,
             stop=pos.order.stop, take=pos.order.take,
+            initial_stop=pos.initial_stop or pos.order.stop,
             qty=pos.qty, notional=pos.notional,
             result="WIN" if pnl > 0 else "LOSS",
             pnl=pnl, fees=fees, balance_after=self.balance,
@@ -371,7 +377,8 @@ class Engine:
 
                 pos = Position(order=order, qty=qty, entry_price=price,
                                entry_ts=int(ts), notional=notional,
-                               capped=capped, best_price=price)
+                               capped=capped, best_price=price,
+                               initial_stop=order.stop)
                 self.counters["filled"] += 1
 
                 # Позиция могла быть выбита той же свечой, на которой

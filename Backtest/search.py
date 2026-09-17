@@ -35,7 +35,10 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from Backtest import data, strategies
+from Backtest import data, strategies, strategies_more
+
+# Все семейства стратегий в одном месте
+REGISTRY = {**strategies.REGISTRY, **strategies_more.REGISTRY}
 from Backtest.engine import Engine, FILL_MARKET
 
 # Счёт заведомо больше нужного: лимит плеча не должен вмешиваться
@@ -51,7 +54,10 @@ def r_metrics(engine):
                 "wr": 0.0, "pf": 0.0, "mean_R_gross": 0.0, "fee_R": 0.0,
                 "max_dd": 0.0}
 
-    risk_usd = (tr.entry_price - tr["stop"]).abs() * tr.qty
+    # Риск — до ИСХОДНОГО стопа. Финальный стоп у трейлинговых сделок
+    # подтянут к цене, и деление на него раздувало R до +7 и выше.
+    stop_col = "initial_stop" if "initial_stop" in tr.columns else "stop"
+    risk_usd = (tr.entry_price - tr[stop_col]).abs() * tr.qty
     risk_usd = risk_usd.replace(0, np.nan)
     r_net = (tr.pnl / risk_usd).dropna()
     r_gross = ((tr.pnl + tr.fees) / risk_usd).dropna()
@@ -84,7 +90,7 @@ def r_metrics(engine):
 
 def prepare(symbols_data, strategy, params):
     """Считаем сигналы для всех инструментов один раз."""
-    fn = strategies.REGISTRY[strategy]
+    fn = REGISTRY[strategy]
     out = {}
     for sym, df in symbols_data.items():
         if df is None or len(df) < 200:
