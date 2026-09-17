@@ -52,6 +52,11 @@ function s(tag, attrs = {}) {
   for (const [k, v] of Object.entries(attrs)) if (v != null) el.setAttribute(k, v);
   return el;
 }
+// Округление до центов ДО показа. Без него слагаемые на экране не
+// сходятся с суммой: −$5.13 и +$3.30 дают −$1.83, а посчитанная
+// отдельно разница показывается как −$1.82. Каждое число по
+// отдельности верное, а вместе — бессмыслица.
+const cents = v => Math.round((v || 0) * 100) / 100;
 const money = (v, sign = false) => {
   if (v == null || !isFinite(v)) return "—";
   const a = Math.abs(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -111,23 +116,24 @@ $("#theme").addEventListener("click", () => {
 // ── Герой ─────────────────────────────────────────────────
 function renderHero() {
   const bots = S.bots;
-  const dep = bots.reduce((a, b) => a + b.deposit, 0);
-  const bal = bots.reduce((a, b) => a + b.balance, 0);
-  const unr = bots.reduce((a, b) => a + (b.unrealized || 0), 0);
-  const eq = bal + unr;
-  const d = eq - dep;
-  $("#hero-value").textContent = money(eq);
+  // Крупное число — деньги, которые уже на счетах. Раньше здесь была
+  // сумма баланса и плавающей прибыли по открытым позициям, и человек
+  // видел «капитал $98.18» при убытке −$5.13: цифры не сходились,
+  // потому что в одном числе смешаны зафиксированное и ещё нет.
+  const dep = cents(bots.reduce((a, b) => a + b.deposit, 0));
+  const bal = cents(bots.reduce((a, b) => a + b.balance, 0));
+  const unr = cents(bots.reduce((a, b) => a + (b.unrealized || 0), 0));
+  const realized = cents(bal - dep);
+  const eq = cents(bal + unr);
+  $("#hero-value").textContent = money(bal);
 
-  // Сначала то, что уже зафиксировано, и только потом бумажная
-  // прибыль по открытым позициям: иначе плюс по открытым маскирует
-  // убыток по закрытым.
-  const realized = bal - dep;
   const delta = $("#hero-delta");
   delta.replaceChildren(
     h("span", { class: tone(realized) },
       arrow(realized) + money(realized, true) + " закрытыми сделками (" + pct(dep ? realized / dep * 100 : 0) + ")"),
     h("span", { class: "hero-note" },
-      unr ? `открытые позиции ${money(unr, true)} — ещё не зафиксированы` : "открытых позиций нет")
+      unr ? `открытые позиции ${money(unr, true)} — если закрыть их сейчас, будет ${money(eq)}`
+          : "открытых позиций нет")
   );
 
   const trades = bots.reduce((a, b) => a + b.trades_count, 0);
@@ -151,9 +157,14 @@ function renderBots() {
 }
 
 function botCard(b) {
-  const unreal = b.unrealized || 0;
-  const eq = b.balance + unreal;          // капитал с учётом открытых позиций
-  const realized = b.balance - b.deposit; // то, что уже зафиксировано
+  // Те же правила, что в шапке: округляем до центов заранее, чтобы
+  // числа на карточке сходились между собой, и нигде не смешиваем
+  // зафиксированное с плавающим
+  const bal = cents(b.balance);
+  const dep = cents(b.deposit);
+  const unreal = cents(b.unrealized);
+  const realized = cents(bal - dep);      // то, что уже зафиксировано
+  const eq = cents(bal + unreal);         // сколько будет, если закрыть всё сейчас
   const lastTs = parseLogTs(b.last_cycle);
   const stateCls = b.running ? "on" : (b.enabled ? "restarting" : "");
   const stateTxt = b.running ? "Работает" : (b.enabled ? "Перезапуск…" : "Остановлен");
@@ -186,7 +197,7 @@ function botCard(b) {
         h("div", { class: "bot-title", style: "display:flex;gap:10px;align-items:baseline;flex-wrap:wrap" },
           b.name,
           h("span", { class: "muted", style: "font-size:13px;font-weight:500" },
-            `капитал ${money(eq)}`)),
+            `на счёте ${money(bal)}`)),
         h("div", { class: "bot-rules" }, `${b.rules} · риск ${Math.round(b.risk_pct * 100)}% · до ${b.max_open} позиций`)),
       h("span", { class: "status " + stateCls }, h("span", { class: "status-dot" }), stateTxt),
       btn),
@@ -197,9 +208,10 @@ function botCard(b) {
     // проигранная сделка не отразилась на балансе.
     h("div", { class: "tiles" },
       tile("Закрытые сделки", arrow(realized) + money(realized, true),
-        `баланс ${money(b.balance)} · ${pct(b.deposit ? realized / b.deposit * 100 : 0)}`, tone(realized)),
+        `баланс ${money(bal)} · ${pct(dep ? realized / dep * 100 : 0)}`, tone(realized)),
       tile("Открытые позиции", b.positions.length ? arrow(unreal) + money(unreal, true) : "—",
-        b.positions.length ? `${b.positions.length} шт · пока не зафиксировано` : "нет открытых", tone(unreal)),
+        b.positions.length ? `${b.positions.length} шт · закрыть сейчас — на счёте ${money(eq)}` : "нет открытых",
+        tone(unreal)),
       tile("Сделок", String(b.trades_count), b.wr == null ? "WR —" : `WR ${b.wr.toFixed(0)}%`),
       tile("Средний результат", b.avg_r == null ? "—" : rr(b.avg_r), `просадка ${pct(b.max_dd, 1, false)}`, tone(b.avg_r))),
 
