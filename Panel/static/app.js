@@ -243,7 +243,7 @@ async function toggleBot(b) {
   }
 }
 
-// ── Кривая капитала ───────────────────────────────────────
+// ── Кривая баланса ────────────────────────────────────────
 // ── Демо-счёт ─────────────────────────────────────────────
 function renderDemo() {
   const d = S.demo;
@@ -306,7 +306,9 @@ function renderDemo() {
       sub ? h("div", { class: "tile-sub" }, sub) : null);
     const usdt = v => v == null ? "—" : v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " USDT";
     kids.push(h("div", { class: "tiles" },
-      tile("Капитал демо-счёта", usdt(d.equity), d.start_equity != null ? `старт ${usdt(d.start_equity)}` : null),
+      tile("Капитал демо-счёта", usdt(d.equity),
+        "по данным биржи, вместе с открытыми позициями"
+        + (d.start_equity != null ? ` · старт ${usdt(d.start_equity)}` : "")),
       tile("Результат", res == null ? "—" : arrow(res) + (res > 0 ? "+" : "") + usdt(res),
         "с учётом открытых позиций", tone(res)),
       tile("Свободная маржа", usdt(d.available), null),
@@ -402,7 +404,7 @@ function renderEquity() {
   const Y = v => m.t + (1 - (v - v0) / (v1 - v0)) * ih;
 
   const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, role: "img",
-    "aria-label": "Кривая капитала ботов по закрытым сделкам" });
+    "aria-label": "Кривая баланса ботов по закрытым сделкам" });
 
   for (const v of niceTicks(v0, v1, 5)) {
     svg.append(s("line", { x1: m.l, x2: m.l + iw, y1: Y(v), y2: Y(v), stroke: "var(--grid)", "stroke-width": 1 }));
@@ -503,7 +505,7 @@ function renderEquity() {
   for (const b of S.bots) for (const [t, v] of b.equity) rows.push({ b, t, v });
   rows.sort((a, c) => c.t - a.t);
   $("#eq-table").replaceChildren(h("table", {},
-    h("thead", {}, h("tr", {}, h("th", {}, "Время"), h("th", {}, "Бот"), h("th", { class: "num" }, "Капитал"))),
+    h("thead", {}, h("tr", {}, h("th", {}, "Время"), h("th", {}, "Бот"), h("th", { class: "num" }, "Баланс"))),
     h("tbody", {}, rows.map(r => h("tr", {},
       h("td", {}, dt(r.t)),
       h("td", {}, h("span", { class: "botdot", style: `background:${BOT_COLOR[r.b.id]}` }), r.b.short),
@@ -565,7 +567,7 @@ function renderTrades() {
     h("thead", {}, h("tr", {},
       h("th", {}, "Закрыта"), h("th", {}, "Бот"), h("th", {}, "Монета"), h("th", {}, "Направление"),
       h("th", { class: "num" }, "Вход"), h("th", { class: "num" }, "Выход"), h("th", {}, "Причина"),
-      h("th", { class: "num" }, "Результат"), h("th", { class: "num" }, "Капитал после"))),
+      h("th", { class: "num" }, "Результат"), h("th", { class: "num" }, "Баланс после"))),
     h("tbody", {}, rows.map(({ b, t }) => h("tr", {},
       h("td", { class: "muted" }, dt(new Date(t.closed).getTime())),
       h("td", {}, h("span", { class: "botdot", style: `background:${BOT_COLOR[b.id]}` }), b.short),
