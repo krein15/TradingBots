@@ -41,3 +41,14 @@ Backtest/*.csv
 .env
 *.env
 !.env.example
+
+# Служебные файлы работающих ботов и панели
+*.lock
+*.pid
+*.stop
+*.tmp
+Panel/state.json
+Panel/panel.log
+
+# Сводка исследования нужна панели — её храним
+!Backtest/research_summary_4h.csv

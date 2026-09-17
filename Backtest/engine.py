@@ -270,11 +270,17 @@ class Engine:
 
     # ── Главный цикл ──────────────────────────────────────────
     def run(self, symbols_data, regime_lookup=None, btc_lookup=None,
-            progress=None):
+            progress=None, trade_from=None):
         """
         symbols_data: {symbol: DataFrame}. Все символы проходятся
         синхронно по общей временной шкале — депозит и лимит
         одновременных позиций у них общие, как и в бою.
+
+        trade_from — метка времени (мс), раньше которой новые позиции не
+        открываются. Нужна, чтобы индикаторы прогревались на истории ДО
+        оцениваемого периода. Иначе, если нарезать данные ровно по началу
+        периода, первый месяц EMA200 считается по неполному окну, и
+        сигналы в нём не те, что увидел бы бот в бою.
         """
         frames = {}
         for sym, df in symbols_data.items():
@@ -390,6 +396,8 @@ class Engine:
             self.pending = still_pending
 
             # 3. Новые сигналы
+            if trade_from is not None and ts < trade_from:
+                continue                 # прогрев: считаем, но не торгуем
             self.equity.append((int(ts), self.balance))
             if self._is_broke():
                 self.counters["broke_bars"] += 1

@@ -56,11 +56,32 @@ try:
 except Exception:
     pass
 
-from Backtest import strategies
+from Backtest import strategies, strategies_more
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+# Этот файл — общее ядро бумажных ботов: исполнение, журнал, стопы и
+# отбор инструментов одни на всех. Бот #6 (Supertrend) импортирует его
+# и подменяет только правила входа. Так два бота гарантированно
+# исполняют сделки одинаково и различаются ровно тем, что мы сравниваем.
+STRATEGY_FUNCS = {
+    "donchian":   strategies.donchian,
+    "supertrend": strategies_more.supertrend,
+}
+
+# Какие ключи CONFIG являются параметрами правил у каждой стратегии
+STRATEGY_KEYS = {
+    "donchian":   ("channel", "atr_period", "atr_mult", "rr", "ema",
+                   "allow_short", "max_hold_bars"),
+    "supertrend": ("mult", "atr_period", "atr_mult", "rr", "ema",
+                   "allow_short", "max_hold_bars"),
+}
+
 CONFIG = {
+    "bot_id":         "bot5",
+    "bot_name":       "Бот #5 — Дончиан",
+    "strategy":       "donchian",
+
     # ── Правила (найдены перебором, менять только вместе с бэктестом) ──
     "timeframe":      "4h",
     "channel":        20,      # пробой максимума/минимума 20 свечей
@@ -135,8 +156,104 @@ def load_journal(cfg):
 
 
 def save_journal(j, cfg):
-    with open(cfg["journal"], "w", encoding="utf-8") as f:
+    """
+    Атомарная запись: во временный файл, затем подмена.
+
+    Раньше json.dump писал прямо поверх журнала. Остановка процесса или
+    пропадание питания посреди записи оставляли обрезанный JSON — и
+    вся история сделок форвард-теста терялась. os.replace на одном
+    томе атомарен: журнал всегда либо старый целиком, либо новый.
+    """
+    tmp = cfg["journal"] + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(j, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, cfg["journal"])
+
+
+# ─────────────────────────────────────────────────────────────
+#  Единственный экземпляр, остановка по запросу, запрет сна
+# ─────────────────────────────────────────────────────────────
+def lock_path(cfg):
+    return cfg["journal"] + ".lock"
+
+
+def pid_path(cfg):
+    return cfg["journal"] + ".pid"
+
+
+def stop_path(cfg):
+    return cfg["journal"] + ".stop"
+
+
+def acquire_single_instance(cfg):
+    """
+    Блокировка на уровне ОС: второй экземпляр того же бота не стартует.
+
+    Два процесса с одним журналом перезаписывают друг другу сделки. Это
+    легко получить, запустив бота и через .bat, и из панели. Блокировку
+    держит сама ОС и снимает её, когда процесс завершается любым
+    способом — даже аварийно, поэтому «зависших» блокировок не бывает.
+
+    Возвращает дескриптор (его нужно держать открытым) или None, если
+    бот уже запущен.
+    """
+    fd = os.open(lock_path(cfg), os.O_RDWR | os.O_CREAT)
+    try:
+        if os.name == "nt":
+            import msvcrt
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    with open(pid_path(cfg), "w", encoding="utf-8") as f:
+        f.write(str(os.getpid()))
+    return fd
+
+
+def keep_awake(enable):
+    """
+    Просим Windows не засыпать, пока бот работает.
+
+    Во время форвард-теста компьютер уходил в сон: цикл, занимающий
+    секунды, растягивался на 2.5 часа. Это не настройка системы —
+    запрос действует только пока жив процесс, экран гаснуть может,
+    ручной сон и выключение работают как обычно.
+    """
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
+        flags = ES_CONTINUOUS | (ES_SYSTEM_REQUIRED if enable else 0)
+        ctypes.windll.kernel32.SetThreadExecutionState(flags)
+    except Exception:
+        pass
+
+
+def sleep_or_stop(cfg, seconds):
+    """
+    Сон между циклами, прерываемый файлом-флагом остановки.
+
+    Панель останавливает бота, создавая файл .stop. Бот замечает его
+    в течение секунды — и выходит между циклами, а не посреди записи
+    журнала или обработки позиций. Возвращает True, если пора выходить.
+    """
+    end = time.time() + seconds
+    while time.time() < end:
+        if os.path.exists(stop_path(cfg)):
+            try:
+                os.remove(stop_path(cfg))
+            except OSError:
+                pass
+            return True
+        time.sleep(1)
+    return False
 
 
 def get_exchange():
@@ -409,11 +526,19 @@ def close_position(journal, pos, reason, price, ts, cfg):
 #  Цикл
 # ─────────────────────────────────────────────────────────────
 def strategy_params(cfg):
-    return {
-        "channel": cfg["channel"], "atr_period": cfg["atr_period"],
-        "atr_mult": cfg["atr_mult"], "rr": cfg["rr"], "ema": cfg["ema"],
-        "allow_short": cfg["allow_short"], "max_hold_bars": cfg["max_hold_bars"],
-    }
+    name = cfg.get("strategy", "donchian")
+    return {k: cfg[k] for k in STRATEGY_KEYS[name]}
+
+
+def describe_rules(cfg):
+    """Правила одной строкой — для лога и панели."""
+    name = cfg.get("strategy", "donchian")
+    if name == "supertrend":
+        entry = f"Supertrend ×{cfg['mult']}"
+    else:
+        entry = f"Дончиан {cfg['channel']} свечей"
+    return (f"{entry}, стоп {cfg['atr_mult']} ATR, тейк {cfg['rr']}R, "
+            f"фильтр EMA{cfg['ema']}, ТФ {cfg['timeframe']}")
 
 
 def prune_acted(journal, days=10):
@@ -494,7 +619,7 @@ def run_cycle(exchange, journal, cfg, symbols):
             continue
 
         # Тот же код сигналов, что и в бэктесте
-        prepared = strategies.donchian(df, p)
+        prepared = STRATEGY_FUNCS[cfg.get("strategy", "donchian")](df, p)
         i = len(prepared) - 1            # последняя ЗАКРЫТАЯ свеча
         sigs = strategies.signal_fn(prepared, i, cfg, None, None, None)
         if not sigs:
@@ -568,7 +693,7 @@ def print_stats(journal, cfg):
     t = journal["trades"]
     bal, dep = journal["balance"], journal["deposit"]
     print("=" * 62)
-    print("  БОТ #5 — Дончиан 4ч, Bitget перпетуалы")
+    print(f"  {cfg.get('bot_name', 'Бот')} — Bitget перпетуалы")
     print("=" * 62)
     print(f"  Старт: {journal['created'][:16]}   циклов: {journal.get('cycles', 0)}")
     print(f"  Депозит ${dep:.2f} → баланс ${bal:.2f}  "
@@ -608,8 +733,8 @@ def print_stats(journal, cfg):
 # ─────────────────────────────────────────────────────────────
 #  Точка входа
 # ─────────────────────────────────────────────────────────────
-def main():
-    cfg = CONFIG.copy()
+def main(cfg=None):
+    cfg = dict(cfg or CONFIG)
     mode = sys.argv[1] if len(sys.argv) > 1 else "run"
 
     if mode == "reset":
@@ -661,11 +786,23 @@ def main():
         print("обнуляет чистоту накопленной форвард-статистики.")
         return
 
+    lock = acquire_single_instance(cfg)
+    if lock is None:
+        msg = (f"{cfg.get('bot_name', 'Бот')} уже запущен — второй экземпляр "
+               f"не стартует, иначе два процесса испортят общий журнал.")
+        print(f"[!] {msg}")
+        log(f"[!] {msg}", cfg, show=False)
+        return
+    # Старый флаг остановки, оставшийся от прошлого запуска, не должен
+    # погасить бота сразу после старта
+    if os.path.exists(stop_path(cfg)):
+        os.remove(stop_path(cfg))
+    keep_awake(True)
+
     log("=" * 56, cfg, show=False)
     log(f"СТАРТ  депозит=${cfg['deposit']}  риск={cfg['risk_pct']:.0%}  "
         f"макс.позиций={cfg['max_open']}  плечо<={cfg['max_leverage']}x", cfg)
-    log(f"Правила: Дончиан {cfg['channel']} свечей, стоп {cfg['atr_mult']} ATR, "
-        f"тейк {cfg['rr']}R, фильтр EMA{cfg['ema']}, ТФ {cfg['timeframe']}", cfg)
+    log(f"Правила: {describe_rules(cfg)}", cfg)
 
     symbols, warn = active_symbols(ex, cfg)
     if not symbols:
@@ -690,7 +827,9 @@ def main():
                 f"WR={wr:.1f}%  среднее={avg_r:+.3f}R  "
                 f"открыто={len(journal['open'])}  новых={opened}", cfg)
             log(f"Следующий цикл через {cfg['scan_interval_min']} мин", cfg, show=False)
-            time.sleep(cfg["scan_interval_min"] * 60)
+            if sleep_or_stop(cfg, cfg["scan_interval_min"] * 60):
+                log("Остановлен из панели", cfg)
+                break
 
         except KeyboardInterrupt:
             log("Остановлен пользователем", cfg)
@@ -698,7 +837,11 @@ def main():
             break
         except Exception as e:
             log(f"ОШИБКА: {type(e).__name__}: {e} — повтор через 5 мин", cfg)
-            time.sleep(300)
+            if sleep_or_stop(cfg, 300):
+                log("Остановлен из панели", cfg)
+                break
+
+    keep_awake(False)
 
 
 if __name__ == "__main__":
