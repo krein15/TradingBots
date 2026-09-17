@@ -123,6 +123,17 @@ CONFIG = {
     # случилось при первом запуске на 5%: три входа по свече,
     # закрывшейся 190 минут назад. Порог = интервал опроса + запас.
     "max_signal_age_min": 30,
+    # Пауза по инструменту после убытка — ровно как в движке бэктеста.
+    # На проверке длина паузы почти ни на что не влияет: 0, 4, 8 и 24
+    # часа дают от +0.193R до +0.226R, разброс меньше погрешности.
+    # 8 часов взяты как середина, менять смысла нет.
+    "cooldown_hours": 8,
+    # Чего ждать от бота: показывается и в статистике, и в панели
+    # рядом с фактом, чтобы расхождение было видно сразу. Диапазон,
+    # а не точка: нижняя граница — медиана по случайным наборам монет
+    # на проверке, верхняя — среднее за весь период. Реальный набор
+    # монет может оказаться любым из них.
+    "expect": {"wr": 35, "r_lo": 0.10, "r_hi": 0.20},
     "candles":        400,     # хватает на EMA200 с запасом
     "journal":        os.path.join(HERE, "donchian_journal.json"),
     "logfile":        os.path.join(HERE, "donchian_log.txt"),
@@ -452,7 +463,62 @@ def position_size(balance, entry, stop, cfg):
     return qty, notional, note
 
 
-def check_exit(pos, df):
+def entry_bar_range(exchange, pos, cfg):
+    """
+    Размах свечи, ВНУТРИ которой бот вошёл, — считая только с момента входа.
+
+    Сигнал приходит по закрытой свече, а вход происходит уже внутри
+    следующей. К моменту входа эта свеча успевает прожить до
+    max_signal_age_min минут, и её high/low включают движение, которого
+    в сделке бота не было. Судить по ним нельзя: бот зафиксировал бы
+    стоп по проколу, случившемуся до его входа (или тейк — так же зря).
+
+    Поэтому для этой одной свечи берём минутные свечи с момента входа
+    и считаем размах по ним. Считаем один раз: свеча уже закрыта,
+    пересчитывать её каждый цикл незачем.
+
+    Вернуть None значит «уточнить не вышло» — тогда вызывающий код
+    работает по исходной свече, как раньше.
+    """
+    if "entry_bar" in pos:
+        return pos["entry_bar"]
+
+    step = TF_MS.get(cfg["timeframe"], 14_400_000)
+    bar_ts = pos["entry_ts"] + step              # свеча, в которой вошли
+    if exchange.milliseconds() < bar_ts + step:
+        return None                              # ещё формируется
+
+    wall = pos.get("entry_wall_ms")
+    if wall is None:                             # позиции до этой правки
+        dt = parse_iso(pos.get("opened", ""))
+        wall = int(dt.timestamp() * 1000) if dt else None
+    if wall is None or wall <= bar_ts:
+        return None                              # вход в самом начале свечи
+
+    end = bar_ts + step
+    mins, since = [], wall
+    for _ in range(3):                           # 1м-страницы по 200 штук
+        try:
+            page = exchange.fetch_ohlcv(pos["symbol"], "1m", since=since, limit=200)
+        except Exception:
+            return None
+        if not page:
+            break
+        mins += [r for r in page if wall <= r[0] < end]
+        last = page[-1][0]
+        if last + 60_000 >= end:
+            break
+        since = last + 60_000
+    if not mins or max(r[0] for r in mins) + 60_000 < end:
+        return None                              # данных на всю свечу нет
+
+    pos["entry_bar"] = {"ts": bar_ts,
+                        "high": max(r[2] for r in mins),
+                        "low": min(r[3] for r in mins)}
+    return pos["entry_bar"]
+
+
+def check_exit(pos, df, entry_bar=None):
     """
     Задет ли стоп или тейк свечами, закрывшимися ПОСЛЕ входа.
 
@@ -462,16 +528,21 @@ def check_exit(pos, df):
 
     Оба уровня задеты одной свечой — считаем стопом: порядок
     движения цены внутри свечи неизвестен.
+
+    entry_bar — уточнённый размах свечи входа (см. entry_bar_range).
     """
     seg = df[df.timestamp > pos["entry_ts"]]
     if seg.empty:
         return None, None, 0
     d, stop, take = pos["dir"], pos["stop"], pos["take"]
     for _, bar in seg.iterrows():
+        high, low = bar.high, bar.low
+        if entry_bar and int(bar.timestamp) == entry_bar["ts"]:
+            high, low = entry_bar["high"], entry_bar["low"]
         if d == 1:
-            hit_stop, hit_take = bar.low <= stop, bar.high >= take
+            hit_stop, hit_take = low <= stop, high >= take
         else:
-            hit_stop, hit_take = bar.high >= stop, bar.low <= take
+            hit_stop, hit_take = high >= stop, low <= take
         if hit_stop:
             return "stop", int(bar.timestamp), len(seg)
         if hit_take:
@@ -510,9 +581,13 @@ def close_position(journal, pos, reason, price, ts, cfg):
         "opened": pos["opened"], "closed": datetime.now().isoformat(),
         "entry_ts": pos["entry_ts"], "exit_ts": ts,
         "bars_held": pos.get("bars_held", 0),
+        # Уточнялся ли размах свечи входа по минуткам. Нужно проверке
+        # журналов: выход на самой свече входа без уточнения — повод
+        # не доверять сделке.
+        "entry_bar_checked": "entry_bar" in pos,
     })
     if pnl <= 0:
-        unblock = datetime.now() + timedelta(hours=8)
+        unblock = datetime.now() + timedelta(hours=cfg.get("cooldown_hours", 8))
         journal.setdefault("cooldown", {})[pos["symbol"]] = unblock.isoformat()
 
     em = "🟢 WIN " if pnl > 0 else "🔴 LOSS"
@@ -571,7 +646,7 @@ def run_cycle(exchange, journal, cfg, symbols):
             still_open.append(pos)
             continue
 
-        reason, ts, bars = check_exit(pos, df)
+        reason, ts, bars = check_exit(pos, df, entry_bar_range(exchange, pos, cfg))
         pos["bars_held"] = bars
         if reason:
             close_position(journal, pos, reason,
@@ -670,6 +745,9 @@ def run_cycle(exchange, journal, cfg, symbols):
             "stop_pct": round(risk / entry, 5),
             "opened": datetime.now().isoformat(),
             "entry_ts": signal_ts,
+            # Момент входа по часам биржи: по нему отсекается движение
+            # свечи входа, случившееся до нас (см. entry_bar_range)
+            "entry_wall_ms": exchange.milliseconds(),
             "signal_age_min": round(age_min, 1),
             "bars_held": 0,
         }
@@ -711,7 +789,10 @@ def print_stats(journal, cfg):
         print(f"\n  Сделок: {len(df)}   WR: {wr:.1f}%   "
               f"среднее: {df.r_multiple.mean():+.3f}R")
         print(f"  Макс. просадка: {dd:.1f}%   комиссии: ${df.fees.sum():.2f}")
-        print(f"  Ожидание по бэктесту: WR ~33%, +0.19R на сделку")
+        e = cfg.get("expect")
+        if e:
+            print(f"  Ожидание по бэктесту: WR ~{e['wr']}%, "
+                  f"{e['r_lo']:+.2f}R … {e['r_hi']:+.2f}R на сделку")
         print("\n  По причине выхода:")
         for r, g in df.groupby("exit_reason"):
             print(f"    {r:<6} {len(g):>4} шт   среднее {g.r_multiple.mean():+.3f}R")
@@ -738,6 +819,14 @@ def main(cfg=None):
     mode = sys.argv[1] if len(sys.argv) > 1 else "run"
 
     if mode == "reset":
+        # Сброс на ходу ничего бы не дал: работающий бот держит журнал
+        # в памяти и в ближайшем цикле записал бы его обратно. Хуже
+        # того, человек считал бы, что история обнулена.
+        probe = acquire_single_instance(cfg)
+        if probe is None:
+            print(f"[!] {cfg.get('bot_name', 'Бот')} сейчас работает. "
+                  f"Сначала остановите его, потом сбрасывайте журнал.")
+            return
         for f in (cfg["journal"], cfg["logfile"]):
             if os.path.exists(f):
                 os.remove(f)
@@ -803,6 +892,19 @@ def main(cfg=None):
     log(f"СТАРТ  депозит=${cfg['deposit']}  риск={cfg['risk_pct']:.0%}  "
         f"макс.позиций={cfg['max_open']}  плечо<={cfg['max_leverage']}x", cfg)
     log(f"Правила: {describe_rules(cfg)}", cfg)
+
+    # Паспорт бота в журнале. Панель читает его отсюда, а не импортирует
+    # код бота: иначе ей пришлось бы грузить pandas и ccxt (~110 МБ)
+    # только ради того, чтобы узнать правила и размер риска.
+    journal["meta"] = {
+        "bot_id": cfg.get("bot_id"), "bot_name": cfg.get("bot_name"),
+        "strategy": cfg.get("strategy"), "rules": describe_rules(cfg),
+        "risk_pct": cfg["risk_pct"], "max_open": cfg["max_open"],
+        "deposit": cfg["deposit"], "timeframe": cfg["timeframe"],
+        "expect": cfg.get("expect"),
+        "symbols": len(SYMBOLS),
+    }
+    save_journal(journal, cfg)
 
     symbols, warn = active_symbols(ex, cfg)
     if not symbols:

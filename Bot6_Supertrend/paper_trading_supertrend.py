@@ -55,6 +55,9 @@ CONFIG.update({
     "ema":           200,     # лонги выше EMA200, шорты ниже
     "allow_short":   True,
     "max_hold_bars": 200,
+    # Нижняя — среднее за весь период, верхняя — медиана на проверке,
+    # где Supertrend повезло с медвежьим рынком
+    "expect":        {"wr": 33, "r_lo": 0.11, "r_hi": 0.28},
 
     # ── Свой журнал и лог ─────────────────────────────────────
     "journal":       os.path.join(HERE, "supertrend_journal.json"),

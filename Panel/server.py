@@ -7,22 +7,27 @@ Panel/server.py
 Консоль не появляется: сервер работает через pythonw, а интерфейс
 открывается окном-приложением Chrome (или Edge) без адресной строки.
 
-Как устроено:
-  сервер слушает ТОЛЬКО 127.0.0.1 — снаружи к нему не подключиться;
-  боты — отдельные процессы. Закрытие панели их не останавливает, а
-    повторный запуск панели находит уже работающих ботов;
-  «работает ли бот» панель узнаёт по блокировке его журнала, которую
-    держит сам процесс бота (см. acquire_single_instance в ядре). Это
-    надёжнее, чем помнить PID: блокировку снимает ОС, когда процесс
-    умирает любым способом;
-  остановка — файл-флаг: бот выходит между циклами, а не посреди
-    записи журнала. Если за 20 секунд не вышел — принудительно;
-  боты, включённые в панели, перезапускаются, если упали.
+── Только стандартная библиотека ──────────────────────────────
+Первая версия импортировала код ботов ради их настроек и ccxt ради
+цен — и занимала 213–309 МБ, больше любого бота, хотя только читает
+файлы. pandas и ccxt вместе весят ~110 МБ, плюс ccxt держит в памяти
+описания всех 790 рынков. Теперь:
+  настройки бот сам пишет в журнал при старте («meta»), панель их читает;
+  цены — один HTTP-запрос к публичному API Bitget раз в 20 секунд;
+  в итоге сервер весит ~25 МБ.
 
-Защита команд. Любой сайт, открытый в браузере, технически может
-отправить запрос на localhost. Поэтому команды принимаются только с
-секретным токеном в заголовке, который есть лишь у страницы самой
-панели, и только с правильным заголовком Host (защита от DNS rebinding).
+── Как устроено ───────────────────────────────────────────────
+  сервер слушает ТОЛЬКО 127.0.0.1;
+  боты — отдельные процессы: закрытие панели их не останавливает;
+  «работает ли бот» — по блокировке журнала, которую держит сам бот;
+  остановка — файл-флаг, бот выходит между циклами; не вышел за
+    20 секунд — принудительно;
+  включённые в панели боты, которые упали, поднимаются через 30 секунд.
+
+Команды принимаются только с секретным токеном, который есть лишь у
+страницы самой панели, и с правильным Host (защита от DNS rebinding).
+Ключи демо-счёта сервер не читает и не отдаёт — только проверяет, что
+в .env заданы все три имени.
 """
 
 import csv
@@ -48,13 +53,12 @@ LOG_FILE = HERE / "panel.log"
 
 HOST, PORT = "127.0.0.1", 8765
 TOKEN = secrets.token_urlsafe(24)
+# Меняется при каждом старте сервера. Окно, открытое до перезапуска,
+# видит смену и перезагружается само — иначе у него остаётся токен
+# прежнего сервера, и кнопки молча не работают.
+INSTANCE = secrets.token_hex(6)
 
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "Bot5_Donchian"))
-sys.path.insert(0, str(ROOT / "Bot6_Supertrend"))
-
-# Под pythonw у процесса нет консоли: sys.stdout и sys.stderr равны None,
-# и любой вывод в них падает. Всё служебное — в файл.
+# Под pythonw у процесса нет консоли: sys.stdout и sys.stderr равны None
 if sys.stdout is None:
     sys.stdout = open(LOG_FILE, "a", encoding="utf-8", buffering=1)
 if sys.stderr is None:
@@ -66,36 +70,81 @@ def plog(msg):
         f.write(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {msg}\n")
 
 
-import paper_trading_donchian as core        # noqa: E402
-import paper_trading_supertrend as st_bot    # noqa: E402
-
 PYTHON = ROOT / ".venv" / "Scripts" / "python.exe"
 if not PYTHON.exists():
     PYTHON = Path(sys.executable)
 
+# Реестр ботов. «fallback» — то, что показать, пока бот ни разу не
+# запускался и не записал свой паспорт в журнал. Как только запустится,
+# источником истины становится его meta.
 BOTS = {
     "bot5": {
-        "cfg": core.CONFIG,
-        "short": "Дончиан",
+        "kind": "paper", "short": "Дончиан",
         "script": ROOT / "Bot5_Donchian" / "paper_trading_donchian.py",
+        "journal": ROOT / "Bot5_Donchian" / "donchian_journal.json",
+        "log": ROOT / "Bot5_Donchian" / "donchian_log.txt",
+        "fallback": {"bot_name": "Бот #5 — Дончиан", "risk_pct": 0.05, "max_open": 5, "deposit": 50.0,
+                     "rules": "Дончиан 20 свечей, стоп 2.5 ATR, тейк 3.0R, фильтр EMA200, ТФ 4h"},
         # Диапазон, а не точка: нижняя граница — медиана по случайным
         # наборам монет на проверке, верхняя — среднее за весь период
         "expect": {"wr": 35, "r_lo": 0.10, "r_hi": 0.20},
     },
     "bot6": {
-        "cfg": st_bot.CONFIG,
-        "short": "Supertrend",
+        "kind": "paper", "short": "Supertrend",
         "script": ROOT / "Bot6_Supertrend" / "paper_trading_supertrend.py",
-        # Нижняя граница — среднее за весь период, верхняя — медиана на
-        # проверке, где Supertrend повезло с медвежьим рынком
+        "journal": ROOT / "Bot6_Supertrend" / "supertrend_journal.json",
+        "log": ROOT / "Bot6_Supertrend" / "supertrend_log.txt",
+        "fallback": {"bot_name": "Бот #6 — Supertrend", "risk_pct": 0.05, "max_open": 5, "deposit": 50.0,
+                     "rules": "Supertrend ×3.0, стоп 2.5 ATR, тейк 3.0R, фильтр EMA200, ТФ 4h"},
+        # Нижняя — среднее за весь период, верхняя — медиана на проверке,
+        # где Supertrend повезло с медвежьим рынком
         "expect": {"wr": 33, "r_lo": 0.11, "r_hi": 0.28},
+    },
+    "demo": {
+        "kind": "demo", "short": "Демо",
+        "script": ROOT / "BotDemo" / "demo_trading.py",
+        "journal": ROOT / "BotDemo" / "demo_journal.json",
+        "log": ROOT / "BotDemo" / "demo_log.txt",
+        "fallback": {"bot_name": "Демо Bitget — обе стратегии", "risk_pct": 0.05, "max_open": 5},
     },
 }
 
+ENV_FILE = ROOT / ".env"
+DEMO_KEY_NAMES = ("BITGET_DEMO_API_KEY", "BITGET_DEMO_API_SECRET", "BITGET_DEMO_API_PASSPHRASE")
+
+
+def demo_keys_configured():
+    """Заданы ли все три ключа. Сами значения не читаются наружу."""
+    if not ENV_FILE.exists():
+        return False
+    found = set()
+    try:
+        for line in ENV_FILE.read_text(encoding="utf-8-sig").splitlines():
+            line = line.strip()
+            if "=" in line and not line.startswith("#"):
+                k, v = line.split("=", 1)
+                if k.strip() in DEMO_KEY_NAMES and v.strip().strip('"').strip("'"):
+                    found.add(k.strip())
+    except Exception:
+        return False
+    return found == set(DEMO_KEY_NAMES)
+
 
 # ─────────────────────────────────────────────────────────────
-#  Состояние процессов
+#  Процессы
 # ─────────────────────────────────────────────────────────────
+def lock_path(spec):
+    return str(spec["journal"]) + ".lock"
+
+
+def pid_path(spec):
+    return str(spec["journal"]) + ".pid"
+
+
+def stop_path(spec):
+    return str(spec["journal"]) + ".stop"
+
+
 def load_desired():
     try:
         return json.loads(STATE_FILE.read_text(encoding="utf-8"))
@@ -109,12 +158,9 @@ def save_desired(d):
     os.replace(tmp, STATE_FILE)
 
 
-def is_running(cfg):
-    """
-    Работает ли бот — пробуем взять ЕГО блокировку. Взяли — значит
-    никто её не держит: сразу отпускаем и говорим «не работает».
-    """
-    path = core.lock_path(cfg)
+def is_running(spec):
+    """Пробуем взять блокировку бота: взяли — значит никто её не держит."""
+    path = lock_path(spec)
     if not os.path.exists(path):
         return False
     try:
@@ -143,31 +189,29 @@ def is_running(cfg):
         os.close(fd)
 
 
-def read_pid(cfg):
+def read_pid(spec):
     try:
-        return int(Path(core.pid_path(cfg)).read_text(encoding="utf-8").strip())
+        return int(Path(pid_path(spec)).read_text(encoding="utf-8").strip())
     except Exception:
         return None
 
 
 _lock = threading.Lock()
-_restart_after = {}      # bot_id -> не раньше какого времени перезапускать
+_restart_after = {}
+NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 
 def start_bot(bot_id):
     spec = BOTS[bot_id]
-    cfg = spec["cfg"]
     with _lock:
         d = load_desired()
         d[bot_id] = True
         save_desired(d)
-        if is_running(cfg):
+        if is_running(spec):
             return "уже работает"
-        err = open(Path(cfg["journal"]).with_suffix(".stderr.txt"), "a", encoding="utf-8")
+        err = open(Path(spec["journal"]).with_suffix(".stderr.txt"), "a", encoding="utf-8")
         env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
-        flags = 0
-        if os.name == "nt":
-            flags = 0x08000000 | 0x00000200   # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+        flags = NO_WINDOW | (0x00000200 if os.name == "nt" else 0)   # + CREATE_NEW_PROCESS_GROUP
         subprocess.Popen([str(PYTHON), "-u", str(spec["script"])],
                          cwd=str(spec["script"].parent), env=env,
                          stdout=subprocess.DEVNULL, stderr=err,
@@ -177,49 +221,61 @@ def start_bot(bot_id):
 
 
 def stop_bot(bot_id):
-    cfg = BOTS[bot_id]["cfg"]
+    spec = BOTS[bot_id]
     with _lock:
         d = load_desired()
         d[bot_id] = False
         save_desired(d)
-    if not is_running(cfg):
+    if not is_running(spec):
         return "не работал"
-    Path(core.stop_path(cfg)).write_text("stop", encoding="utf-8")
+    Path(stop_path(spec)).write_text("stop", encoding="utf-8")
     for _ in range(20):
         time.sleep(1)
-        if not is_running(cfg):
+        if not is_running(spec):
             plog(f"остановлен {bot_id} (штатно)")
             return "остановлен"
-    # Не вышел за 20 секунд — скорее всего завис на сетевом запросе
-    pid = read_pid(cfg)
+    pid = read_pid(spec)
     if pid:
         try:
             if os.name == "nt":
                 subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                               capture_output=True, creationflags=0x08000000)
+                               capture_output=True, creationflags=NO_WINDOW)
             else:
                 os.kill(pid, 9)
         except Exception as e:
             plog(f"не удалось завершить {bot_id}: {e}")
     try:
-        os.remove(core.stop_path(cfg))
+        os.remove(stop_path(spec))
     except OSError:
         pass
     plog(f"остановлен {bot_id} (принудительно)")
     return "остановлен принудительно"
 
 
+def demo_check():
+    """Проверка демо-ключа отдельным процессом: ключи трогает только он."""
+    spec = BOTS["demo"]
+    try:
+        r = subprocess.run([str(PYTHON), "-u", str(spec["script"]), "check"],
+                           cwd=str(spec["script"].parent), capture_output=True,
+                           timeout=120, creationflags=NO_WINDOW,
+                           env=dict(os.environ, PYTHONIOENCODING="utf-8"))
+        text = (r.stdout or b"").decode("utf-8", "replace") + (r.stderr or b"").decode("utf-8", "replace")
+        return {"ok": r.returncode == 0, "code": r.returncode, "output": text[-4000:]}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "code": -1, "output": "Проверка не уложилась в 2 минуты — нет связи с Bitget?"}
+
+
 def watchdog():
-    """Включённые в панели боты, которые упали, поднимаются через 30 с."""
     while True:
         try:
             d = load_desired()
             for bot_id, spec in BOTS.items():
-                if not d.get(bot_id):
+                if not d.get(bot_id) or is_running(spec):
                     _restart_after.pop(bot_id, None)
                     continue
-                if is_running(spec["cfg"]):
-                    _restart_after.pop(bot_id, None)
+                # Демо без ключей поднимать бессмысленно — только шум в логе
+                if spec["kind"] == "demo" and not demo_keys_configured():
                     continue
                 due = _restart_after.get(bot_id)
                 if due is None:
@@ -234,29 +290,31 @@ def watchdog():
 
 
 # ─────────────────────────────────────────────────────────────
-#  Цены открытых позиций
+#  Цены — один запрос к публичному API, без ccxt
 # ─────────────────────────────────────────────────────────────
 _prices = {"ts": 0, "data": {}}
 
 
 def price_loop():
-    """Раз в 20 с — текущие цены по открытым позициям обоих ботов."""
-    import ccxt
-    ex = None
+    url = "https://api.bitget.com/api/v2/mix/market/tickers?productType=USDT-FUTURES"
     while True:
         try:
-            symbols = set()
+            wanted = set()
             for spec in BOTS.values():
-                j = read_journal(spec["cfg"])
-                for p in (j or {}).get("open", []):
-                    symbols.add(p["symbol"])
-            if symbols:
-                if ex is None:
-                    ex = ccxt.bitget({"enableRateLimit": True,
-                                      "options": {"defaultType": "swap"}})
-                t = ex.fetch_tickers(sorted(symbols))
-                _prices["data"] = {s: v.get("last") for s, v in t.items() if v.get("last")}
-                _prices["ts"] = time.time()
+                j = read_journal(spec) or {}
+                wanted |= {p["symbol"] for p in j.get("open", [])}
+            if wanted:
+                req = urllib.request.Request(url, headers={"User-Agent": "tradingbots-panel"})
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    rows = json.loads(r.read()).get("data") or []
+                by_id = {row.get("symbol"): row for row in rows}
+                data = {}
+                for sym in wanted:
+                    base, rest = sym.split("/", 1)
+                    row = by_id.get(base + rest.split(":")[0])     # BTC/USDT:USDT -> BTCUSDT
+                    if row and row.get("lastPr"):
+                        data[sym] = float(row["lastPr"])
+                _prices["data"], _prices["ts"] = data, time.time()
         except Exception as e:
             plog(f"цены: {type(e).__name__}: {str(e)[:120]}")
         time.sleep(20)
@@ -268,21 +326,23 @@ def price_loop():
 _journal_cache = {}
 
 
-def read_journal(cfg):
-    """
-    Журнал может быть в процессе подмены — тогда отдаём прошлую версию,
-    а не падаем и не показываем пустоту.
-    """
-    path = cfg["journal"]
+def read_journal(spec):
+    """Журнал может подменяться прямо сейчас — тогда отдаём прошлую версию."""
+    path = str(spec["journal"])
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return None
+    cached = _journal_cache.get(path)
+    if cached and cached[0] == mtime:
+        return cached[1]                      # не перечитываем без изменений
     try:
         with open(path, "r", encoding="utf-8") as f:
             j = json.load(f)
-        _journal_cache[path] = j
+        _journal_cache[path] = (mtime, j)
         return j
-    except FileNotFoundError:
-        return None
     except Exception:
-        return _journal_cache.get(path)
+        return cached[1] if cached else None
 
 
 def tail(path, n):
@@ -290,7 +350,7 @@ def tail(path, n):
         with open(path, "rb") as f:
             f.seek(0, 2)
             size = f.tell()
-            f.seek(max(0, size - 200_000))
+            f.seek(max(0, size - 60_000))
             lines = f.read().decode("utf-8", errors="replace").splitlines()
         return lines[-n:]
     except Exception:
@@ -304,22 +364,23 @@ def _ts(iso):
         return None
 
 
-def bot_state(bot_id):
-    spec = BOTS[bot_id]
-    cfg = spec["cfg"]
-    j = read_journal(cfg) or {}
-    deposit = float(j.get("deposit", cfg["deposit"]))
+def last_cycle_time(spec):
+    for line in reversed(tail(spec["log"], 40)):
+        if line.startswith("[") and ("Баланс=" in line or "Капитал=" in line):
+            return line[1:20]
+    return None
+
+
+def paper_state(bot_id, spec):
+    j = read_journal(spec) or {}
+    meta = {**spec["fallback"], **(j.get("meta") or {})}
+    deposit = float(j.get("deposit", meta.get("deposit", 50.0)))
     balance = float(j.get("balance", deposit))
     trades = j.get("trades", [])
-    opened = j.get("open", [])
-
-    wins = [t for t in trades if t.get("result") == "WIN"]
+    wins = sum(1 for t in trades if t.get("result") == "WIN")
     rs = [t.get("r_multiple", 0) for t in trades]
 
-    # Кривая капитала по закрытым сделкам
-    equity = []
-    start_ts = _ts(j.get("created", "")) or int(time.time() * 1000)
-    equity.append([start_ts, deposit])
+    equity = [[_ts(j.get("created", "")) or int(time.time() * 1000), deposit]]
     for t in trades:
         ts = _ts(t.get("closed", ""))
         if ts:
@@ -330,68 +391,90 @@ def bot_state(bot_id):
         max_dd = min(max_dd, (b - peak) / peak * 100 if peak else 0)
 
     positions, unreal = [], 0.0
-    for p in opened:
+    for p in j.get("open", []):
         price = _prices["data"].get(p["symbol"])
         risk = abs(p["entry"] - p["stop"]) * p["qty"]
         pnl = (price - p["entry"]) * p["qty"] * p["dir"] if price else None
-        if pnl is not None:
-            unreal += pnl
+        unreal += pnl or 0
         positions.append({
             "symbol": p["symbol"].split("/")[0], "dir": p["dir"],
             "entry": p["entry"], "stop": p["stop"], "take": p["take"],
             "price": price, "pnl": pnl,
             "r": (pnl / risk) if (pnl is not None and risk > 0) else None,
             "notional": p.get("notional"), "opened": p.get("opened"),
-            "stop_pct": p.get("stop_pct"),
         })
 
-    logs = tail(cfg["logfile"], 250)
-    last_cycle = None
-    for line in reversed(logs):
-        if "Баланс=" in line and line.startswith("["):
-            last_cycle = line[1:20]
-            break
-
     return {
-        "id": bot_id,
-        "name": cfg.get("bot_name", bot_id),
-        "short": spec["short"],
-        "rules": core.describe_rules(cfg),
-        "risk_pct": cfg["risk_pct"],
-        "max_open": cfg["max_open"],
-        "running": is_running(cfg),
-        "enabled": bool(load_desired().get(bot_id)),
-        "pid": read_pid(cfg),
-        "created": j.get("created"),
-        "cycles": j.get("cycles", 0),
-        "last_cycle": last_cycle,
-        "deposit": deposit,
-        "balance": balance,
-        "unrealized": unreal,
-        "trades_count": len(trades),
-        "wins": len(wins),
-        "wr": (len(wins) / len(trades) * 100) if trades else None,
+        "id": bot_id, "kind": "paper", "short": spec["short"],
+        "name": meta["bot_name"], "rules": meta["rules"],
+        "risk_pct": meta["risk_pct"], "max_open": meta["max_open"],
+        "running": is_running(spec), "enabled": bool(load_desired().get(bot_id)),
+        "pid": read_pid(spec), "cycles": j.get("cycles", 0),
+        "last_cycle": last_cycle_time(spec),
+        "deposit": deposit, "balance": balance, "unrealized": unreal,
+        "trades_count": len(trades), "wins": wins,
+        "wr": (wins / len(trades) * 100) if trades else None,
         "avg_r": (sum(rs) / len(rs)) if rs else None,
-        "max_dd": max_dd,
-        "equity": equity,
-        "positions": positions,
+        "max_dd": max_dd, "equity": equity, "positions": positions,
         "trades": [{
             "symbol": t["symbol"].split("/")[0], "dir": t["dir"],
             "entry": t.get("entry"), "exit": t.get("exit"),
             "reason": t.get("exit_reason"), "r": t.get("r_multiple"),
-            "pnl": t.get("pnl"), "closed": t.get("closed"),
-            "balance": t.get("balance"),
+            "pnl": t.get("pnl"), "closed": t.get("closed"), "balance": t.get("balance"),
         } for t in trades[-100:]][::-1],
-        "expect": spec["expect"],
+        # Источник истины — паспорт бота в журнале; список ниже нужен
+        # только пока бот ни разу не запускался
+        "expect": (meta.get("expect") or spec["expect"]),
+    }
+
+
+def demo_state(spec):
+    j = read_journal(spec) or {}
+    meta = {**spec["fallback"], **(j.get("meta") or {})}
+    trades = j.get("trades", [])
+    per = {}
+    for strat in ("donchian", "supertrend"):
+        ts = [t for t in trades if t.get("strategy") == strat]
+        rs = [t["r_multiple"] for t in ts if t.get("r_multiple") is not None]
+        per[strat] = {
+            "trades": len(ts), "wins": sum(1 for t in ts if t.get("result") == "WIN"),
+            "avg_r": (sum(rs) / len(rs)) if rs else None,
+            "pnl": sum(t.get("pnl") or 0 for t in ts),
+            "funding": sum(t.get("funding") or 0 for t in ts),
+            "open": sum(1 for p in j.get("open", []) if p.get("strategy") == strat),
+        }
+    return {
+        "id": "demo", "kind": "demo", "short": spec["short"], "name": meta["bot_name"],
+        "rules": meta.get("rules"), "risk_pct": meta["risk_pct"], "max_open": meta["max_open"],
+        "leverage": meta.get("leverage"), "symbols": meta.get("symbols"),
+        "running": is_running(spec), "enabled": bool(load_desired().get("demo")),
+        "pid": read_pid(spec), "cycles": j.get("cycles", 0),
+        "last_cycle": last_cycle_time(spec),
+        "keys": demo_keys_configured(), "last_error": j.get("last_error"),
+        "equity": j.get("equity"), "start_equity": j.get("start_equity"),
+        "available": j.get("available"), "foreign": j.get("foreign", []),
+        "per_strategy": per,
+        "positions": [{
+            "strategy": p["strategy"], "symbol": p["symbol"].split("/")[0], "dir": p["dir"],
+            "entry": p["entry"], "stop": p["stop"], "take": p["take"],
+            "price": p.get("mark") or _prices["data"].get(p["symbol"]),
+            "pnl": p.get("unrealized"),
+            "r": (p["unrealized"] / p["risk_usd"]) if (p.get("unrealized") is not None and p.get("risk_usd")) else None,
+            "notional": p.get("notional"), "opened": p.get("opened"),
+        } for p in j.get("open", [])],
+        "trades": [{
+            "strategy": t.get("strategy"), "symbol": t["symbol"].split("/")[0], "dir": t["dir"],
+            "entry": t.get("entry"), "exit": t.get("exit"), "reason": t.get("exit_reason"),
+            "r": t.get("r_multiple"), "pnl": t.get("pnl"), "funding": t.get("funding"),
+            "closed": t.get("closed"),
+        } for t in trades[-100:]][::-1],
     }
 
 
 def research():
-    """Результаты исследований — то, с чем сравнивать живую торговлю."""
     out = {}
     try:
-        out["projection"] = json.loads(
-            (ROOT / "Backtest" / "projection_100.json").read_text(encoding="utf-8"))
+        out["projection"] = json.loads((ROOT / "Backtest" / "projection_100.json").read_text(encoding="utf-8"))
     except Exception:
         out["projection"] = None
     try:
@@ -404,9 +487,11 @@ def research():
 
 def state():
     return {
+        "instance": INSTANCE,
         "now": int(time.time() * 1000),
         "prices_age": (time.time() - _prices["ts"]) if _prices["ts"] else None,
-        "bots": [bot_state(b) for b in BOTS],
+        "bots": [paper_state(b, BOTS[b]) for b in ("bot5", "bot6")],
+        "demo": demo_state(BOTS["demo"]),
     }
 
 
@@ -419,7 +504,7 @@ MIME = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
-        pass                                   # под pythonw писать некуда
+        pass
 
     def _host_ok(self):
         host = (self.headers.get("Host") or "").split(":")[0]
@@ -453,7 +538,7 @@ class Handler(BaseHTTPRequestHandler):
             bot = parse_qs(u.query).get("bot", ["bot5"])[0]
             if bot not in BOTS:
                 return self._json({"error": "нет такого бота"}, 404)
-            return self._json({"lines": tail(BOTS[bot]["cfg"]["logfile"], 400)})
+            return self._json({"lines": tail(BOTS[bot]["log"], 400)})
 
         name = "index.html" if u.path in ("/", "/index.html") else u.path.lstrip("/")
         path = (STATIC / name).resolve()
@@ -468,17 +553,19 @@ class Handler(BaseHTTPRequestHandler):
         if not self._host_ok() or self.headers.get("X-Panel-Token") != TOKEN:
             return self._json({"error": "запрещено"}, 403)
         u = urlparse(self.path)
-        q = parse_qs(u.query)
-        bot = q.get("bot", [None])[0]
+        bot = parse_qs(u.query).get("bot", [None])[0]
         if u.path in ("/api/start", "/api/stop"):
             if bot not in BOTS:
                 return self._json({"error": "нет такого бота"}, 404)
+            if u.path == "/api/start" and BOTS[bot]["kind"] == "demo" and not demo_keys_configured():
+                return self._json({"error": "не заданы ключи демо-счёта в .env"}, 400)
             result = start_bot(bot) if u.path == "/api/start" else stop_bot(bot)
             return self._json({"ok": True, "result": result})
+        if u.path == "/api/demo/check":
+            return self._json(demo_check())
         if u.path == "/api/quit":
             self._json({"ok": True})
-            threading.Thread(target=lambda: (time.sleep(0.5), os._exit(0)),
-                             daemon=True).start()
+            threading.Thread(target=lambda: (time.sleep(0.5), os._exit(0)), daemon=True).start()
             return
         self._json({"error": "нет такой команды"}, 404)
 
@@ -487,16 +574,14 @@ class Handler(BaseHTTPRequestHandler):
 #  Запуск
 # ─────────────────────────────────────────────────────────────
 def find_app_browser():
-    """Chrome в приоритете, затем Edge — оба умеют режим приложения."""
     env = os.environ
-    candidates = [
+    for c in (
         Path(env.get("ProgramFiles", r"C:\Program Files")) / "Google/Chrome/Application/chrome.exe",
         Path(env.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Google/Chrome/Application/chrome.exe",
         Path(env.get("LOCALAPPDATA", "")) / "Google/Chrome/Application/chrome.exe",
         Path(env.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Microsoft/Edge/Application/msedge.exe",
         Path(env.get("ProgramFiles", r"C:\Program Files")) / "Microsoft/Edge/Application/msedge.exe",
-    ]
-    for c in candidates:
+    ):
         if c.is_file():
             return c
     return None
@@ -507,7 +592,7 @@ def open_window(url):
     if browser:
         try:
             subprocess.Popen([str(browser), f"--app={url}", "--window-size=1480,940"],
-                             creationflags=0x08000000 if os.name == "nt" else 0)
+                             creationflags=NO_WINDOW)
             return
         except Exception as e:
             plog(f"окно приложения: {e}")
@@ -526,7 +611,6 @@ def main():
     url = f"http://{HOST}:{PORT}/"
     no_window = "--no-window" in sys.argv
     if already_running():
-        # Панель уже работает в фоне — просто показать окно ещё раз
         if not no_window:
             open_window(url)
         return

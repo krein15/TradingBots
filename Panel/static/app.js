@@ -15,6 +15,14 @@ let eqView = "chart";
 let tab = "positions";
 let logBot = "bot5";
 const busy = new Set();    // боты, по которым идёт команда
+let demoCheck = null;      // результат последней проверки демо-ключа
+let lastSig = "";          // отпечаток данных — перерисовываем только при изменении
+let lastRenderAt = 0;
+
+const STRAT_RU = { donchian: "Дончиан", supertrend: "Supertrend" };
+BOT_COLOR["demo-donchian"] = "var(--bot5)";
+BOT_COLOR["demo-supertrend"] = "var(--bot6)";
+const demoBot = strat => ({ id: "demo-" + strat, short: "Демо · " + (STRAT_RU[strat] || strat) });
 
 // ── Утилиты ───────────────────────────────────────────────
 function h(tag, attrs = {}, ...kids) {
@@ -30,6 +38,13 @@ function h(tag, attrs = {}, ...kids) {
     if (kid == null || kid === false) continue;
     el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
   }
+  return el;
+}
+// replaceChildren(null) печатает на странице слово "null" — браузер
+// приводит его к тексту. h() такие значения отбрасывает, а прямые
+// вызовы нет, поэтому для них есть fill().
+function fill(el, ...kids) {
+  el.replaceChildren(...kids.flat().filter(k => k != null && k !== false));
   return el;
 }
 function s(tag, attrs = {}) {
@@ -103,10 +118,16 @@ function renderHero() {
   const d = eq - dep;
   $("#hero-value").textContent = money(eq);
 
+  // Сначала то, что уже зафиксировано, и только потом бумажная
+  // прибыль по открытым позициям: иначе плюс по открытым маскирует
+  // убыток по закрытым.
+  const realized = bal - dep;
   const delta = $("#hero-delta");
   delta.replaceChildren(
-    h("span", { class: tone(d) }, arrow(d) + money(d, true) + "  (" + pct(dep ? d / dep * 100 : 0) + ")"),
-    h("span", { class: "hero-note" }, `с начала · закрытые сделки ${money(bal - dep, true)} · открытые позиции ${money(unr, true)}`)
+    h("span", { class: tone(realized) },
+      arrow(realized) + money(realized, true) + " закрытыми сделками (" + pct(dep ? realized / dep * 100 : 0) + ")"),
+    h("span", { class: "hero-note" },
+      unr ? `открытые позиции ${money(unr, true)} — ещё не зафиксированы` : "открытых позиций нет")
   );
 
   const trades = bots.reduce((a, b) => a + b.trades_count, 0);
@@ -130,8 +151,9 @@ function renderBots() {
 }
 
 function botCard(b) {
-  const eq = b.balance + (b.unrealized || 0);
-  const pnl = eq - b.deposit;
+  const unreal = b.unrealized || 0;
+  const eq = b.balance + unreal;          // капитал с учётом открытых позиций
+  const realized = b.balance - b.deposit; // то, что уже зафиксировано
   const lastTs = parseLogTs(b.last_cycle);
   const stateCls = b.running ? "on" : (b.enabled ? "restarting" : "");
   const stateTxt = b.running ? "Работает" : (b.enabled ? "Перезапуск…" : "Остановлен");
@@ -161,14 +183,23 @@ function botCard(b) {
     h("div", { class: "bot-head" },
       h("span", { class: "bot-key", style: `background:${BOT_COLOR[b.id]}` }),
       h("div", { style: "flex:1;min-width:0" },
-        h("div", { class: "bot-title" }, b.name),
+        h("div", { class: "bot-title", style: "display:flex;gap:10px;align-items:baseline;flex-wrap:wrap" },
+          b.name,
+          h("span", { class: "muted", style: "font-size:13px;font-weight:500" },
+            `капитал ${money(eq)}`)),
         h("div", { class: "bot-rules" }, `${b.rules} · риск ${Math.round(b.risk_pct * 100)}% · до ${b.max_open} позиций`)),
       h("span", { class: "status " + stateCls }, h("span", { class: "status-dot" }), stateTxt),
       btn),
 
+    // Закрытый результат и незакрытые позиции — РАЗНЫЕ плитки.
+    // Пока они были сложены в одну «Прибыль», прибыль по открытым
+    // позициям перекрывала убыток по закрытым, и казалось, что
+    // проигранная сделка не отразилась на балансе.
     h("div", { class: "tiles" },
-      tile("Капитал", money(eq), `старт ${money(b.deposit)}`),
-      tile("Прибыль", arrow(pnl) + money(pnl, true), pct(b.deposit ? pnl / b.deposit * 100 : 0), tone(pnl)),
+      tile("Закрытые сделки", arrow(realized) + money(realized, true),
+        `баланс ${money(b.balance)} · ${pct(b.deposit ? realized / b.deposit * 100 : 0)}`, tone(realized)),
+      tile("Открытые позиции", b.positions.length ? arrow(unreal) + money(unreal, true) : "—",
+        b.positions.length ? `${b.positions.length} шт · пока не зафиксировано` : "нет открытых", tone(unreal)),
       tile("Сделок", String(b.trades_count), b.wr == null ? "WR —" : `WR ${b.wr.toFixed(0)}%`),
       tile("Средний результат", b.avg_r == null ? "—" : rr(b.avg_r), `просадка ${pct(b.max_dd, 1, false)}`, tone(b.avg_r))),
 
@@ -201,6 +232,120 @@ async function toggleBot(b) {
 }
 
 // ── Кривая капитала ───────────────────────────────────────
+// ── Демо-счёт ─────────────────────────────────────────────
+function renderDemo() {
+  const d = S.demo;
+  const box = $("#demo");
+  if (!d) { box.replaceChildren(); return; }
+
+  const err = d.last_error;
+  const stateCls = d.running ? "on" : err ? "error" : (d.enabled ? "restarting" : "");
+  const stateTxt = d.running ? "Работает" : err ? "Остановлен с ошибкой" : (d.enabled && d.keys ? "Перезапуск…" : "Остановлен");
+  const isBusy = busy.has("demo");
+
+  const startBtn = h("button", {
+    class: "btn" + (d.running ? "" : " primary"),
+    disabled: isBusy || (!d.running && !d.keys) || null,
+    title: !d.keys ? "Сначала нужны демо-ключи в .env" : null,
+    onclick: () => toggleBot(d),
+  }, isBusy ? "Секунду…" : d.running ? "Остановить" : "Запустить");
+
+  const checkBtn = h("button", {
+    class: "btn", disabled: !d.keys || demoCheck === "running" || null,
+    onclick: runDemoCheck,
+  }, demoCheck === "running" ? "Проверяю…" : "Проверить подключение");
+
+  const kids = [
+    h("div", { class: "bot-head" },
+      h("div", { style: "flex:1;min-width:0" },
+        h("div", { class: "bot-title", style: "display:flex;gap:10px;align-items:center" },
+          d.name, h("span", { class: "demo-badge" }, "демо-счёт")),
+        h("div", { class: "bot-rules" },
+          "Настоящие заявки, вымышленные деньги · обе стратегии на одном счёте · " +
+          (d.symbols ? `${d.symbols} монет · ` : "") +
+          (d.leverage ? `плечо ${d.leverage}x · ` : "") +
+          `риск ${Math.round(d.risk_pct * 100)}% доли стратегии · до ${d.max_open} позиций на стратегию`)),
+      h("span", { class: "status " + stateCls }, h("span", { class: "status-dot" }), stateTxt),
+      checkBtn, startBtn),
+  ];
+
+  if (!d.keys) {
+    kids.push(h("div", { class: "callout" },
+      h("b", {}, "Нужны ключи демо-счёта Bitget. "), "Три шага:",
+      h("ol", {},
+        h("li", {}, "На bitget.com переключитесь в режим «Демо-торговля» и там создайте API-ключ. Права: чтение и торговля. Вывод средств не включайте."),
+        h("li", {}, "В корне проекта скопируйте файл .env.example в .env и впишите ключ, секрет и пароль (passphrase)."),
+        h("li", {}, "Нажмите «Проверить подключение» — ни одной заявки отправлено не будет."))));
+  }
+  if (err) {
+    kids.push(h("div", { class: "callout bad" }, h("b", {}, "Бот остановился: "), err));
+  }
+  if (demoCheck && demoCheck !== "running") {
+    kids.push(h("div", { class: "callout" + (demoCheck.ok ? "" : " bad") },
+      h("b", {}, demoCheck.ok ? "Проверка пройдена" : "Проверка не пройдена"),
+      h("div", { class: "check-out", style: "margin-top:8px" }, demoCheck.output.trim())));
+  }
+
+  if (d.equity != null) {
+    const res = d.start_equity != null ? d.equity - d.start_equity : null;
+    const funding = Object.values(d.per_strategy).reduce((a, x) => a + (x.funding || 0), 0);
+    const tile = (label, value, sub, cls) => h("div", { class: "tile" },
+      h("div", { class: "tile-label" }, label), h("div", { class: "tile-value " + (cls || "") }, value),
+      sub ? h("div", { class: "tile-sub" }, sub) : null);
+    const usdt = v => v == null ? "—" : v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " USDT";
+    kids.push(h("div", { class: "tiles" },
+      tile("Капитал демо-счёта", usdt(d.equity), d.start_equity != null ? `старт ${usdt(d.start_equity)}` : null),
+      tile("Результат", res == null ? "—" : arrow(res) + (res > 0 ? "+" : "") + usdt(res),
+        "с учётом открытых позиций", tone(res)),
+      tile("Свободная маржа", usdt(d.available), null),
+      tile("Funding", usdt(funding), "по закрытым позициям, от биржи", tone(funding))));
+
+    kids.push(h("div", { class: "strat-rows" }, ["donchian", "supertrend"].map(s => {
+      const x = d.per_strategy[s];
+      const cell = (label, value, cls) => h("div", { class: "strat-cell" },
+        h("div", { class: "tile-label" }, label), h("b", { class: cls || "" }, value));
+      return h("div", { class: "strat-row" },
+        h("span", { class: "bot-key", style: `background:${s === "donchian" ? "var(--bot5)" : "var(--bot6)"}` }),
+        h("div", {}, h("b", {}, STRAT_RU[s])),
+        cell("Открыто", String(x.open)),
+        cell("Сделок", String(x.trades)),
+        cell("WR", x.trades ? pct(x.wins / x.trades * 100, 0, false) : "—"),
+        cell("Средний R", rr(x.avg_r), tone(x.avg_r)),
+        cell("Итог", x.trades ? (x.pnl > 0 ? "+" : "") + x.pnl.toFixed(2) : "—", tone(x.pnl)));
+    })));
+  }
+
+  if (d.positions.length) {
+    kids.push(h("div", { class: "mini-pos" }, d.positions.map(p => h("span", { class: "pos-chip" },
+      h("span", { class: "botdot", style: `background:${BOT_COLOR["demo-" + p.strategy]};margin-right:0` }),
+      h("b", {}, p.symbol),
+      h("span", { class: "muted" }, p.dir === 1 ? "лонг" : "шорт"),
+      h("span", { class: tone(p.r) }, p.r == null ? "…" : arrow(p.r) + rr(p.r))))));
+  }
+  if (d.foreign && d.foreign.length) {
+    kids.push(h("div", { class: "card-sub" },
+      `На демо-счёте есть позиции, открытые не ботом: ${d.foreign.map(s => s.split("/")[0]).join(", ")} — эти монеты бот не трогает.`));
+  }
+
+  const lastTs = parseLogTs(d.last_cycle);
+  kids.push(h("div", { class: "bot-foot" },
+    h("span", {}, lastTs ? `Последний цикл ${ago(lastTs)}` : "Циклов ещё не было"),
+    h("span", {}, `цикл №${d.cycles}` + (d.running && d.pid ? ` · процесс ${d.pid}` : ""))));
+
+  box.replaceChildren(h("article", { class: "card demo", "aria-label": d.name }, kids));
+}
+
+async function runDemoCheck() {
+  demoCheck = "running";
+  renderDemo();
+  try {
+    demoCheck = await api("/api/demo/check", "POST");
+  } catch (e) {
+    demoCheck = { ok: false, output: "Не удалось выполнить проверку: " + e.message };
+  }
+  renderDemo();
+}
+
 function niceTicks(lo, hi, n = 5) {
   const span = hi - lo || 1;
   const step0 = span / n;
@@ -337,9 +482,9 @@ function renderEquity() {
   hit.addEventListener("pointerleave", leave);
 
   const noTrades = S.bots.every(b => b.trades_count === 0);
-  box.replaceChildren(svg, tip,
-    noTrades ? h("div", { class: "card-sub", style: "text-align:center;margin-top:6px" },
-      "Закрытых сделок пока нет — кривая оживёт, когда закроется первая позиция") : null);
+  fill(box, svg, tip,
+    noTrades && h("div", { class: "card-sub", style: "text-align:center;margin-top:6px" },
+      "Закрытых сделок пока нет — кривая оживёт, когда закроется первая позиция"));
 
   // Табличный двойник графика
   const rows = [];
@@ -359,7 +504,10 @@ function sideCell(dir) {
 }
 
 function renderPositions() {
-  const rows = S.bots.flatMap(b => b.positions.map(p => ({ b, p })));
+  const rows = [
+    ...S.bots.flatMap(b => b.positions.map(p => ({ b, p }))),
+    ...(S.demo ? S.demo.positions.map(p => ({ b: demoBot(p.strategy), p })) : []),
+  ];
   const el = $('[data-panel="positions"]');
   if (!rows.length) {
     el.replaceChildren(h("div", { class: "empty" },
@@ -391,8 +539,10 @@ function renderPositions() {
 }
 
 function renderTrades() {
-  const rows = S.bots.flatMap(b => b.trades.map(t => ({ b, t })))
-    .sort((a, c) => new Date(c.t.closed) - new Date(a.t.closed));
+  const rows = [
+    ...S.bots.flatMap(b => b.trades.map(t => ({ b, t }))),
+    ...(S.demo ? S.demo.trades.map(t => ({ b: demoBot(t.strategy), t })) : []),
+  ].sort((a, c) => new Date(c.t.closed) - new Date(a.t.closed));
   const el = $('[data-panel="trades"]');
   if (!rows.length) {
     el.replaceChildren(h("div", { class: "empty" }, "Закрытых сделок пока нет."));
@@ -581,6 +731,7 @@ function render() {
   if (!S) return;
   renderHero();
   renderBots();
+  renderDemo();
   renderEquity();
   if (tab === "positions") renderPositions();
   if (tab === "trades") renderTrades();
@@ -590,10 +741,26 @@ function render() {
 async function refresh() {
   document.body.classList.remove("stale");
   try {
-    S = await api("/api/state");
-    const running = S.bots.filter(b => b.running).length;
-    $("#meta").textContent = `${running} из ${S.bots.length} ботов работают · обновлено ${new Date().toLocaleTimeString("ru-RU")}`;
-    render();
+    const next = await api("/api/state");
+    // Сервер перезапустился — у страницы устаревший токен и, возможно,
+    // устаревший код. Перезагружаемся, чтобы кнопки снова работали.
+    if (S && S.instance && next.instance && S.instance !== next.instance) {
+      location.reload();
+      return;
+    }
+    const all = [...next.bots, ...(next.demo ? [next.demo] : [])];
+    const running = all.filter(b => b.running).length;
+    $("#meta").textContent = `${running} из ${all.length} ботов работают · обновлено ${new Date().toLocaleTimeString("ru-RU")}`;
+    // Перерисовка только если данные изменились — или раз в минуту,
+    // чтобы обновились «N мин назад». Иначе Chrome пересобирал всю
+    // страницу каждые 5 секунд впустую.
+    const sig = JSON.stringify({ ...next, now: 0, prices_age: 0 });
+    S = next;
+    if (sig !== lastSig || Date.now() - lastRenderAt > 60000) {
+      lastSig = sig;
+      lastRenderAt = Date.now();
+      render();
+    }
     if (tab === "log") renderLog();
   } catch (e) {
     // Панель выключена или связь пропала — держим последний кадр приглушённым
@@ -642,5 +809,7 @@ $("#quit-ok").addEventListener("click", async () => {
 let resizeT;
 addEventListener("resize", () => { clearTimeout(resizeT); resizeT = setTimeout(render, 120); });
 
+// Свёрнутое окно ничего не опрашивает: данные нужны только тому, кто смотрит
 refresh();
-setInterval(refresh, 5000);
+setInterval(() => { if (!document.hidden) refresh(); }, 5000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
