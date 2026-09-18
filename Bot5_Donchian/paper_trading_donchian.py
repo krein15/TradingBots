@@ -403,7 +403,11 @@ def discover_symbols(exchange, cfg, allowed=None):
     return [s for s, _ in rows[:cfg["max_symbols"]]], None
 
 
-def fetch_candles(exchange, symbol, timeframe, limit):
+class DataUnavailable(Exception):
+    """Биржа не отдала данные ни по одному инструменту — цикл был бы вслепую."""
+
+
+def fetch_candles(exchange, symbol, timeframe, limit, errors=None):
     """
     Свечи БЕЗ последней, ещё формирующейся.
 
@@ -426,7 +430,13 @@ def fetch_candles(exchange, symbol, timeframe, limit):
                                         "low", "close", "volume"])
         df["dt"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
         return df.reset_index(drop=True)
-    except Exception:
+    except Exception as e:
+        # Раньше ошибка глоталась молча. 18.09 после выхода ноутбука из
+        # режима ожидания биржа 7 часов не отвечала, бот в каждом цикле
+        # получал пустоту, писал «Баланс=...» как при успехе — и никто
+        # об этом не знал. Теперь причина уходит вызывающему коду.
+        if errors is not None:
+            errors.append(f"{symbol.split('/')[0]}: {type(e).__name__}: {str(e)[:120]}")
         return None
 
 
@@ -490,7 +500,7 @@ def entry_bar_range(exchange, pos, cfg):
 
     wall = pos.get("entry_wall_ms")
     if wall is None:                             # позиции до этой правки
-        dt = parse_iso(pos.get("opened", ""))
+        dt = _safe_dt(pos.get("opened", ""))
         wall = int(dt.timestamp() * 1000) if dt else None
     if wall is None or wall <= bar_ts:
         return None                              # вход в самом начале свечи
@@ -638,9 +648,9 @@ def run_cycle(exchange, journal, cfg, symbols):
     p = strategy_params(cfg)
 
     # ── 1. Открытые позиции ───────────────────────────────────
-    still_open = []
+    still_open, blind = [], []
     for pos in journal["open"]:
-        df = fetch_candles(exchange, pos["symbol"], cfg["timeframe"], cfg["candles"])
+        df = fetch_candles(exchange, pos["symbol"], cfg["timeframe"], cfg["candles"], blind)
         time.sleep(0.1)
         if df is None:
             still_open.append(pos)
@@ -660,6 +670,17 @@ def run_cycle(exchange, journal, cfg, symbols):
             continue
         still_open.append(pos)
     journal["open"] = still_open
+
+    # Стоп, пропущенный в этом цикле, не потерян: check_exit смотрит все
+    # свечи с момента входа и найдёт касание позже, по той же цене. Но
+    # если не проверена НИ ОДНА позиция, цикл прошёл вслепую, и это
+    # должно быть видно как ошибка, а не как «Баланс=...».
+    if blind and len(blind) == len(journal["open"]):
+        raise DataUnavailable(f"биржа не отдала свечи ни по одной из "
+                              f"{len(blind)} позиций, стопы не проверены — {blind[0]}")
+    if blind:
+        log(f"[!] Нет свечей по {len(blind)} поз., проверю в следующем цикле: "
+            + "; ".join(blind[:3]), cfg)
 
     # ── 2. Хватит ли денег ────────────────────────────────────
     if journal["balance"] < cfg["deposit"] * cfg["risk_pct"]:
@@ -681,14 +702,15 @@ def run_cycle(exchange, journal, cfg, symbols):
         except Exception:
             pass
 
-    opened = 0
+    opened, scanned, missed = 0, 0, []
     for sym in symbols:
         if len(journal["open"]) >= cfg["max_open"]:
             break
         if sym in on_cooldown:
             continue
 
-        df = fetch_candles(exchange, sym, cfg["timeframe"], cfg["candles"])
+        scanned += 1
+        df = fetch_candles(exchange, sym, cfg["timeframe"], cfg["candles"], missed)
         time.sleep(0.1)
         if df is None or len(df) < cfg["ema"] + 30:
             continue
@@ -761,6 +783,9 @@ def run_cycle(exchange, journal, cfg, symbols):
             f"риск=${journal['balance']*cfg['risk_pct']:.2f}"
             + (f" [{note}]" if note else ""), cfg)
 
+    if scanned and len(missed) == scanned:
+        raise DataUnavailable(f"биржа не отдала свечи ни по одному из {scanned} "
+                              f"инструментов, сигналы не проверены — {missed[0]}")
     return opened
 
 
@@ -916,11 +941,13 @@ def main(cfg=None):
         + ", ".join(x.split("/")[0] for x in symbols[:12])
         + (" ..." if len(symbols) > 12 else ""), cfg)
 
+    fails = 0
     while True:
         try:
             log(f"--- Цикл #{journal.get('cycles', 0) + 1} ---", cfg)
             opened = run_cycle(ex, journal, cfg, symbols)
             save_journal(journal, cfg)
+            fails = 0
 
             t = journal["trades"]
             wr = (sum(1 for x in t if x["result"] == "WIN") / len(t) * 100) if t else 0
@@ -938,7 +965,19 @@ def main(cfg=None):
             print_stats(journal, cfg)
             break
         except Exception as e:
+            fails += 1
             log(f"ОШИБКА: {type(e).__name__}: {e} — повтор через 5 мин", cfg)
+            # Закрытия, уже сделанные в этом цикле до ошибки, не теряем
+            try:
+                save_journal(journal, cfg)
+            except Exception:
+                pass
+            # После сна ноутбука подключение к бирже может остаться
+            # полумёртвым. Три ошибки подряд — открываем его заново.
+            if fails >= 3:
+                log("Три ошибки подряд — пересоздаю подключение к бирже", cfg)
+                ex = get_exchange()
+                fails = 0
             if sleep_or_stop(cfg, 300):
                 log("Остановлен из панели", cfg)
                 break

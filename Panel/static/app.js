@@ -57,6 +57,13 @@ function s(tag, attrs = {}) {
 // отдельно разница показывается как −$1.82. Каждое число по
 // отдельности верное, а вместе — бессмыслица.
 const cents = v => Math.round((v || 0) * 100) / 100;
+// 1 раз, 2 раза, 5 раз; 21 раз, 22 раза, 11 раз
+const plural = (n, one, few, many) => {
+  const a = n % 10, b = n % 100;
+  return a === 1 && b !== 11 ? one : a >= 2 && a <= 4 && (b < 12 || b > 14) ? few : many;
+};
+// «2026-09-19 00:05:10» из лога -> «19.09 00:05»
+const logDate = t => t ? `${t.slice(8, 10)}.${t.slice(5, 7)} ${t.slice(11, 16)}` : "";
 const money = (v, sign = false) => {
   if (v == null || !isFinite(v)) return "—";
   const a = Math.abs(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -166,8 +173,24 @@ function botCard(b) {
   const realized = cents(bal - dep);      // то, что уже зафиксировано
   const eq = cents(bal + unreal);         // сколько будет, если закрыть всё сейчас
   const lastTs = parseLogTs(b.last_cycle);
-  const stateCls = b.running ? "on" : (b.enabled ? "restarting" : "");
-  const stateTxt = b.running ? "Работает" : (b.enabled ? "Перезапуск…" : "Остановлен");
+  // «Работает» — только если циклы действительно проходят. Живой
+  // процесс, у которого каждый цикл падает, — это не «работает».
+  const hl = b.health || {};
+  const stateCls = hl.state === "error" ? "error" : hl.state === "stale" ? "restarting"
+    : b.running ? "on" : (b.enabled ? "restarting" : "");
+  const stateTxt = hl.state === "error" ? "Ошибка в цикле"
+    : hl.state === "stale" ? `Нет циклов ${hl.minutes} мин`
+    : b.running ? "Работает" : (b.enabled ? "Перезапуск…" : "Остановлен");
+  const alarm = hl.state === "error"
+    ? h("div", { class: "alarm", role: "alert" },
+        h("b", {}, `Циклы падают с ${logDate(hl.since)} — ${hl.count} ${plural(hl.count, "раз", "раза", "раз")} подряд. `),
+        "Новые входы и стопы не проверяются. ",
+        h("span", { class: "alarm-msg" }, hl.message))
+    : hl.state === "stale"
+    ? h("div", { class: "alarm warn", role: "alert" },
+        h("b", {}, `Последний успешный цикл ${hl.minutes} мин назад. `),
+        "Процесс жив, но циклы не завершаются — посмотрите журнал.")
+    : null;
 
   const isBusy = busy.has(b.id);
   const btn = h("button", {
@@ -201,6 +224,7 @@ function botCard(b) {
         h("div", { class: "bot-rules" }, `${b.rules} · риск ${Math.round(b.risk_pct * 100)}% · до ${b.max_open} позиций`)),
       h("span", { class: "status " + stateCls }, h("span", { class: "status-dot" }), stateTxt),
       btn),
+    alarm,
 
     // Закрытый результат и незакрытые позиции — РАЗНЫЕ плитки.
     // Пока они были сложены в одну «Прибыль», прибыль по открытым

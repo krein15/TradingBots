@@ -371,6 +371,45 @@ def last_cycle_time(spec):
     return None
 
 
+# Цикл бота — раз в 20 минут. Если успешного цикла нет дольше, чем
+# два интервала с запасом, что-то не так, даже если процесс жив.
+STALE_MIN = 50
+
+
+def cycle_health(spec, running):
+    """
+    Работает ли бот на самом деле, а не просто жив ли его процесс.
+
+    Раньше панель смотрела только на процесс. 18.09 оба бота сутки
+    падали в каждом цикле с NameError, процесс при этом оставался
+    жив — ловил ошибку, ждал 5 минут и падал снова, — и панель всё это
+    время показывала «Работает». Теперь смотрим, чем закончился
+    последний цикл: успехом («Баланс=...») или ошибкой.
+    """
+    if not running:
+        return {"state": "off"}
+    last_ok, errors = None, []
+    for line in tail(spec["log"], 400):
+        if not line.startswith("["):
+            continue
+        ts, msg = line[1:20], line[22:]
+        if "Баланс=" in msg or "Капитал=" in msg:
+            last_ok, errors = ts, []       # успех обнуляет серию ошибок
+        elif msg.startswith("ОШИБКА"):
+            errors.append((ts, msg))
+    if errors:
+        return {"state": "error", "since": errors[0][0], "count": len(errors),
+                "message": errors[-1][1][:220], "last_ok": last_ok}
+    if last_ok:
+        try:
+            age = (datetime.now() - datetime.strptime(last_ok, "%Y-%m-%d %H:%M:%S")).total_seconds() / 60
+        except ValueError:
+            age = 0
+        if age > STALE_MIN:
+            return {"state": "stale", "minutes": int(age), "last_ok": last_ok}
+    return {"state": "ok"}
+
+
 def paper_state(bot_id, spec):
     j = read_journal(spec) or {}
     meta = {**spec["fallback"], **(j.get("meta") or {})}
@@ -411,6 +450,7 @@ def paper_state(bot_id, spec):
         "running": is_running(spec), "enabled": bool(load_desired().get(bot_id)),
         "pid": read_pid(spec), "cycles": j.get("cycles", 0),
         "last_cycle": last_cycle_time(spec),
+        "health": cycle_health(spec, is_running(spec)),
         "deposit": deposit, "balance": balance, "unrealized": unreal,
         "trades_count": len(trades), "wins": wins,
         "wr": (wins / len(trades) * 100) if trades else None,
