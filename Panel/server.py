@@ -201,6 +201,58 @@ _restart_after = {}
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 
+CREATE_NEW_PROCESS_GROUP = 0x00000200
+
+# Посредник запускает бота и сразу завершается. Выполняется отдельным
+# процессом python -c, аргументы: файл ошибок, папка, флаги, команда.
+# 0x01000000 — CREATE_BREAKAWAY_FROM_JOB; если задание запрещает выход
+# из него, Windows вернёт ошибку, и бот запустится без этого флага.
+_DETACH = """
+import subprocess, sys
+err = open(sys.argv[1], 'a', encoding='utf-8')
+kw = dict(cwd=sys.argv[2], stdout=subprocess.DEVNULL, stderr=err,
+          stdin=subprocess.DEVNULL)
+flags = int(sys.argv[3])
+try:
+    subprocess.Popen(sys.argv[4:], creationflags=flags | 0x01000000, **kw)
+except OSError:
+    subprocess.Popen(sys.argv[4:], creationflags=flags, **kw)
+"""
+
+
+def spawn_detached(cmd, cwd, env, stderr_path):
+    """
+    Запуск бота так, чтобы он не был потомком панели.
+
+    19.09 в 01:59 приложение Claude обновилось в фоне и перед
+    перезапуском убило деревья процессов своих сессий. Панель в ту ночь
+    была запущена из сессии, боты — её дети, и погибли все трое: 7.5
+    часов без торговли, без строки «Остановлен» в логе. Так же сработал
+    бы «Снять дерево процессов» в диспетчере задач.
+
+    Дерево строится по родителю процесса. Бот запускается через
+    посредника, который сразу завершается, — у бота остаётся мёртвый
+    родитель, и в дерево панели он больше не входит. Панели родство и
+    не нужно: работает ли бот, она узнаёт по файлу блокировки, а
+    останавливает через файл-флаг.
+
+    Если Windows разрешает, бот ещё и выходит из задания (job object)
+    запустившего процесса: иначе закрытие задания тоже убило бы его.
+    """
+    if os.name != "nt":
+        # На Linux то же даёт новая сессия: бот не зависит от панели
+        return subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL,
+                                stderr=open(stderr_path, "a", encoding="utf-8"),
+                                start_new_session=True)
+    flags = NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+    p = subprocess.Popen([str(PYTHON), "-c", _DETACH, str(stderr_path), str(cwd), str(flags), *cmd],
+                         env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, creationflags=flags)
+    p.wait(timeout=30)
+    return p
+
+
 def start_bot(bot_id):
     spec = BOTS[bot_id]
     with _lock:
@@ -209,13 +261,10 @@ def start_bot(bot_id):
         save_desired(d)
         if is_running(spec):
             return "уже работает"
-        err = open(Path(spec["journal"]).with_suffix(".stderr.txt"), "a", encoding="utf-8")
         env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
-        flags = NO_WINDOW | (0x00000200 if os.name == "nt" else 0)   # + CREATE_NEW_PROCESS_GROUP
-        subprocess.Popen([str(PYTHON), "-u", str(spec["script"])],
-                         cwd=str(spec["script"].parent), env=env,
-                         stdout=subprocess.DEVNULL, stderr=err,
-                         stdin=subprocess.DEVNULL, creationflags=flags)
+        spawn_detached([str(PYTHON), "-u", str(spec["script"])],
+                       cwd=str(spec["script"].parent), env=env,
+                       stderr_path=Path(spec["journal"]).with_suffix(".stderr.txt"))
         plog(f"запуск {bot_id}")
         return "запущен"
 
