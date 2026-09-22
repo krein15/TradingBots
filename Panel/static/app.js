@@ -328,7 +328,10 @@ function renderDemo() {
     const tile = (label, value, sub, cls) => h("div", { class: "tile" },
       h("div", { class: "tile-label" }, label), h("div", { class: "tile-value " + (cls || "") }, value),
       sub ? h("div", { class: "tile-sub" }, sub) : null);
-    const usdt = v => v == null ? "—" : v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " USDT";
+    // На демо Bitget деньги вымышленные и называются SUSDT — пишем
+    // ту валюту, которую сообщил бот, а не «USDT» наугад
+    const cur = d.currency || "USDT";
+    const usdt = v => v == null ? "—" : v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " " + cur;
     kids.push(h("div", { class: "tiles" },
       tile("Капитал демо-счёта", usdt(d.equity),
         "по данным биржи, вместе с открытыми позициями"

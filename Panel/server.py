@@ -540,6 +540,7 @@ def demo_state(spec):
         "pid": read_pid(spec), "cycles": j.get("cycles", 0),
         "last_cycle": last_cycle_time(spec),
         "keys": demo_keys_configured(), "last_error": j.get("last_error"),
+        "currency": meta.get("currency"), "scheme": meta.get("scheme"),
         "equity": j.get("equity"), "start_equity": j.get("start_equity"),
         "available": j.get("available"), "foreign": j.get("foreign", []),
         "per_strategy": per,

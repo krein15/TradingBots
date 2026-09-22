@@ -14,29 +14,42 @@ funding (здесь он не оценивается, а приходит от �
 расхождение между ними — это ровно цена реального исполнения.
 
 ── Какое это демо ─────────────────────────────────────────────
-У Bitget два демо. Старое — контракты SBTC/SETH/SXRP, всего три монеты.
-Новое — обычные символы (BTC/USDT:USDT), отдельные демо-ключи и
-заголовок PAPTRADING: 1 в каждом запросе. В новом 45 контрактов, из
-наших 35 монет доступны 15. Используется новое.
+У Bitget две схемы демо, и какая доступна ключу — выясняется только
+на бирже:
+
+  susdt      — отдельный тип контрактов SUSDT-FUTURES: SBTC, SETH,
+               SXRP с расчётом в вымышленной валюте SUSDT. Никаких
+               особых заголовков, обычный ключ;
+  paptrading — обычные символы и заголовок PAPTRADING: 1 в каждом
+               запросе.
+
+Проверено на живом ключе 22.09.2026: paptrading отвечает ошибкой
+40099 «exchange environment is incorrect», а SUSDT-FUTURES работает.
+Поэтому схема не задаётся в коде, а определяется при старте: сначала
+пробуем susdt, затем paptrading, и берём ту, что ответила.
+
+Главное, чего здесь нельзя забывать: ключ у Bitget ОДИН на оба счёта.
+Тот же ключ отвечает и на боевом типе контрактов. Раньше в этом файле
+стояла проверка «демо-ключ обязан получить отказ на боевом счёте» —
+она неверна и давала ложную тревогу «КЛЮЧ РАБОТАЕТ НА РЕАЛЬНОМ СЧЁТЕ»
+на совершенно нормальном демо-ключе.
 
 ── ПРЕДОХРАНИТЕЛЬ ─────────────────────────────────────────────
-Символы в новом демо ТЕ ЖЕ, что на реальном счёте. Демо от реальных
-денег отделяют только ключ и заголовок. Поэтому:
+Раз ключ один на оба счёта, защитой может быть только сам инструмент,
+а не ключ:
 
-1. Клиент биржи — подкласс DemoBitget, который добавляет заголовок
-   PAPTRADING к КАЖДОМУ запросу на уровне подписи. Отправить запрос
-   без него из этого файла невозможно конструктивно, а не «маловероятно».
+1. В схеме susdt заявка возможна только по контракту, который
+   рассчитывается в SUSDT. Эта валюта ничего не стоит и не выводится,
+   поэтому боевой символ здесь не «маловероятен», а невозможен: он
+   рассчитывается в USDT и не проходит проверку на пути исполнения.
 
-2. При каждом старте ключ проверяется на бирже ДВУМЯ запросами баланса
-   (только чтение):
-     без заголовка — обязан получить ОТКАЗ. Если запрос прошёл, ключ
-       работает на реальном счёте, и бот отказывается стартовать;
-     с заголовком — обязан пройти.
-   Сетевая ошибка на первом шаге — это «проверить не удалось», и бот
-   тоже не стартует. Правило одно: сомнение трактуется в сторону отказа.
+2. В схеме paptrading символы те же, что на реальном счёте, и отделяет
+   демо только заголовок. Поэтому клиент — подкласс DemoBitget,
+   добавляющий PAPTRADING на уровне подписи КАЖДОГО запроса.
 
-3. Каждая заявка проходит через place_order, который ещё раз проверяет
-   тип клиента, флаг песочницы и то, что монета из разрешённого списка.
+3. Любая заявка идёт через place_order, который проверяет схему, тип
+   клиента и то, что инструмент из разрешённого списка. Сомнение
+   трактуется в сторону отказа.
 
 ── Одна позиция на монету ─────────────────────────────────────
 На фьючерсах Bitget в одностороннем режиме по монете может быть только
@@ -100,7 +113,10 @@ CONFIG = {
     "scan_interval_min": 20,
     "max_signal_age_min": 30,
     "max_hold_bars":   200,
-    "product_type":    "USDT-FUTURES",
+    # Тип контрактов и валюта счёта зависят от схемы демо и
+    # проставляются при старте, после проверки на бирже
+    "product_type":    None,
+    "currency":        None,
     "journal":         os.path.join(HERE, "demo_journal.json"),
     "logfile":         os.path.join(HERE, "demo_log.txt"),
 }
@@ -156,75 +172,128 @@ class DemoBitget(ccxt.bitget):
         return req
 
 
-def make_demo_client(keys=None):
+# Две схемы демо у Bitget (см. заголовок файла). Какая доступна
+# ключу — выясняет verify_demo_key, спрашивая саму биржу.
+SCHEMES = {
+    "susdt": {
+        "product_type": "SUSDT-FUTURES",
+        "currency": "SUSDT",
+        "header": False,
+        "about": "контракты SBTC/SETH/SXRP с расчётом в вымышленной валюте SUSDT",
+    },
+    "paptrading": {
+        "product_type": "USDT-FUTURES",
+        "currency": "USDT",
+        "header": True,
+        "about": "обычные символы и заголовок PAPTRADING в каждом запросе",
+    },
+}
+
+
+def demo_client(scheme, keys=None):
+    """Клиент для выбранной схемы. Схема запоминается в options —
+    по ней place_order решает, какой предохранитель применять."""
     keys = keys or read_env()
-    ex = DemoBitget({
+    conf = {
         "apiKey": keys["BITGET_DEMO_API_KEY"],
         "secret": keys["BITGET_DEMO_API_SECRET"],
         "password": keys["BITGET_DEMO_API_PASSPHRASE"],
         "enableRateLimit": True,
         "options": {"defaultType": "swap"},
-    })
-    ex.set_sandbox_mode(True)
+    }
+    if SCHEMES[scheme]["header"]:
+        ex = DemoBitget(conf)
+        ex.set_sandbox_mode(True)
+    else:
+        ex = ccxt.bitget(conf)
+    ex.options["demoScheme"] = scheme
     return ex
+
+
+def real_balance(keys=None):
+    """
+    Сколько настоящих денег видит этот ключ. Не проверка, а сведение
+    для человека: ключ у Bitget один на оба счёта, и знать, что стоит
+    за ним на боевой стороне, полезно. Торговать там бот не может —
+    см. place_order.
+    """
+    keys = keys or read_env()
+    try:
+        ex = ccxt.bitget({
+            "apiKey": keys["BITGET_DEMO_API_KEY"],
+            "secret": keys["BITGET_DEMO_API_SECRET"],
+            "password": keys["BITGET_DEMO_API_PASSPHRASE"],
+            "enableRateLimit": True,
+            "options": {"defaultType": "swap"},
+        })
+        bal = ex.fetch_balance({"productType": "USDT-FUTURES"})
+        return float((bal.get("USDT") or {}).get("total") or 0)
+    except Exception:
+        return None
 
 
 def verify_demo_key(log=print):
     """
-    Доказать на бирже, что ключ демонстрационный. Возвращает клиент и
+    Найти на бирже демо-счёт этого ключа. Возвращает клиент, схему и
     баланс или бросает NotDemoError. Только запросы баланса — ни одной
     заявки.
+
+    Проверяем не ключ, а счёт: спрашиваем баланс по каждой известной
+    схеме и берём ту, где на счету есть демо-деньги. Схема susdt идёт
+    первой — её деньги (SUSDT) вообще не существуют вне демо.
     """
     keys = read_env()
     missing = [n for n, v in keys.items() if not v]
     if missing:
         raise NotDemoError("не заданы ключи в .env: " + ", ".join(missing))
 
-    # 1. БЕЗ заголовка — демо-ключ реальный счёт обязан отвергнуть
-    plain = ccxt.bitget({
-        "apiKey": keys["BITGET_DEMO_API_KEY"],
-        "secret": keys["BITGET_DEMO_API_SECRET"],
-        "password": keys["BITGET_DEMO_API_PASSPHRASE"],
-        "enableRateLimit": True,
-        "options": {"defaultType": "swap"},
-    })
-    try:
-        plain.fetch_balance({"productType": CONFIG["product_type"]})
-    except ccxt.NetworkError as e:
-        raise NotDemoError(
-            f"проверить ключ не удалось — сетевая ошибка ({type(e).__name__}). "
-            f"Без проверки торговля не начинается, повторите позже.")
-    except ccxt.BaseError as e:
-        log(f"✔ Реальный счёт ключ не принял — так и должно быть "
-            f"({type(e).__name__}: {str(e)[:120]})")
-    else:
-        raise NotDemoError(
-            "КЛЮЧ РАБОТАЕТ НА РЕАЛЬНОМ СЧЁТЕ. Это не демо-ключ. Торговля "
-            "не начата, ни одной заявки не отправлено. Удалите этот ключ из "
-            ".env и создайте ключ в режиме «Демо-торговля».")
+    why = []
+    for scheme, conf in SCHEMES.items():
+        ex = demo_client(scheme, keys)
+        try:
+            bal = ex.fetch_balance({"productType": conf["product_type"]})
+        except ccxt.NetworkError as e:
+            raise NotDemoError(
+                f"проверить счёт не удалось — сетевая ошибка ({type(e).__name__}). "
+                f"Без проверки торговля не начинается, повторите позже.")
+        except ccxt.BaseError as e:
+            why.append(f"{scheme}: {type(e).__name__} {str(e)[:90]}")
+            continue
+        w = bal.get(conf["currency"]) or {}
+        total, free = float(w.get("total") or 0), float(w.get("free") or 0)
+        if total <= 0:
+            why.append(f"{scheme}: счёт ответил, но {conf['currency']} на нём нет")
+            continue
+        log(f"✔ Демо-счёт найден: {conf['about']}")
+        log(f"✔ На счёте {total:.2f} {conf['currency']}, свободно {free:.2f}")
+        return ex, scheme, total, free
 
-    # 2. С заголовком — демо обязано принять
-    demo = make_demo_client(keys)
-    try:
-        bal = demo.fetch_balance({"productType": CONFIG["product_type"]})
-    except ccxt.AuthenticationError as e:
-        raise NotDemoError(f"демо-счёт отверг ключ: {str(e)[:200]}. "
-                           f"Проверьте, что ключ создан в режиме демо и пароль (passphrase) верный.")
-    except ccxt.BaseError as e:
-        raise NotDemoError(f"демо-счёт недоступен: {type(e).__name__}: {str(e)[:200]}")
-    usdt = bal.get("USDT") or {}
-    total = float(usdt.get("total") or 0)
-    free = float(usdt.get("free") or 0)
-    log(f"✔ Демо-счёт принял ключ: всего {total:.2f} USDT, свободно {free:.2f}")
-    return demo, total, free
+    raise NotDemoError(
+        "демо-счёт не найден ни одной из известных схем. " + "; ".join(why) +
+        ". Проверьте, что на bitget.com включён режим «Демо-торговля», на "
+        "демо-счёте есть средства, а ключ создан с правами чтения и торговли.")
 
 
 def place_order(ex, symbol, side, amount, params, allowed):
-    """Единственный путь к заявке. Любое сомнение — отказ."""
-    if not isinstance(ex, DemoBitget) or not ex.options.get("sandboxMode"):
-        raise NotDemoError("заявка через клиент без режима демо — запрещено")
+    """
+    Единственный путь к заявке. Любое сомнение — отказ.
+
+    Ключ у Bitget один на оба счёта, поэтому отделяет демо от реальных
+    денег сам инструмент: в схеме susdt заявка возможна только по
+    контракту с расчётом в SUSDT — валюте, которой нет вне демо.
+    """
+    scheme = (ex.options or {}).get("demoScheme")
+    if scheme not in SCHEMES:
+        raise NotDemoError("клиент биржи создан в обход demo_client — запрещено")
     if symbol not in allowed:
-        raise NotDemoError(f"{symbol} не в списке разрешённых демо-монет")
+        raise NotDemoError(f"{symbol} не в списке разрешённых демо-инструментов")
+    if scheme == "susdt":
+        settle = (ex.market(symbol) or {}).get("settle")
+        if settle != "SUSDT":
+            raise NotDemoError(f"{symbol} рассчитывается в {settle}, а не в SUSDT — "
+                               f"это боевой контракт, заявка запрещена")
+    elif not isinstance(ex, DemoBitget) or not ex.options.get("sandboxMode"):
+        raise NotDemoError("заявка через клиент без режима демо — запрещено")
     return ex.create_order(symbol, "market", side, amount, None, params)
 
 
@@ -249,15 +318,32 @@ def load_journal(cfg=CONFIG):
 #  Цикл
 # ─────────────────────────────────────────────────────────────
 def demo_symbols(ex):
-    """Зафиксированный список ∩ то, что есть в демо. Только убираем, не добавляем."""
+    """
+    Что торгуем и по чему считаем сигналы: {инструмент демо: боевой символ}.
+
+    В схеме susdt инструментов всего три (SBTC, SETH, SXRP), и своей
+    истории у них 66 дней. Сигналы считаем по БОЕВЫМ свечам: цены
+    совпадают с точностью 0.01–0.12%, история глубже, а главное — это
+    ровно те же сигналы, что у бумажных ботов, поэтому разница между
+    демо и бумагой остаётся ценой исполнения, а не разных данных.
+    """
     markets = ex.load_markets()
-    return [s for s in core.SYMBOLS
-            if (markets.get(s) or {}).get("active") and markets[s].get("swap")]
+    if ex.options.get("demoScheme") == "susdt":
+        pairs = {}
+        for s, m in markets.items():
+            if m.get("swap") and m.get("active") and m.get("settle") == "SUSDT":
+                real = f"{m['base'][1:]}/USDT:USDT"       # SBTC -> BTC/USDT:USDT
+                if real in core.SYMBOLS:
+                    pairs[s] = real
+        return dict(sorted(pairs.items()))
+    # Зафиксированный список ∩ то, что есть в демо. Только убираем, не добавляем.
+    return {s: s for s in core.SYMBOLS
+            if (markets.get(s) or {}).get("active") and markets[s].get("swap")}
 
 
-def fetch_live_positions(ex):
+def fetch_live_positions(ex, cfg=CONFIG):
     out = {}
-    for p in ex.fetch_positions(None, {"productType": CONFIG["product_type"]}):
+    for p in ex.fetch_positions(None, {"productType": cfg["product_type"]}):
         if float(p.get("contracts") or 0) > 0:
             out[p["symbol"]] = p
     return out
@@ -334,7 +420,7 @@ def settle_closed(ex, journal, pos, cfg):
     em = "🟢 WIN " if (net or 0) > 0 else "🔴 LOSS"
     log(f"{em} [{STRATEGY_RU[pos['strategy']]}] {pos['symbol']} "
         f"{'ЛОНГ' if pos['dir'] == 1 else 'ШОРТ'} [{reason}] "
-        f"итог {net if net is not None else '?'} USDT"
+        f"итог {net if net is not None else '?'} {cfg['currency']}"
         + (f" ({r:+.2f}R)" if r is not None else "")
         + (f", funding {funding:+.4f}" if funding else ""), cfg)
     return True
@@ -345,7 +431,7 @@ def run_cycle(ex, journal, cfg, symbols):
     core.prune_acted(journal)
 
     # ── 1. Сверка с биржей: она источник истины ────────────────
-    live = fetch_live_positions(ex)
+    live = fetch_live_positions(ex, cfg)
     still = []
     for pos in journal["open"]:
         if pos["symbol"] in live:
@@ -383,9 +469,9 @@ def run_cycle(ex, journal, cfg, symbols):
 
     # ── 3. Счёт ────────────────────────────────────────────────
     bal = ex.fetch_balance({"productType": cfg["product_type"]})
-    usdt = bal.get("USDT") or {}
-    equity = float(usdt.get("total") or 0)
-    available = float(usdt.get("free") or 0)
+    money = bal.get(cfg["currency"]) or {}
+    equity = float(money.get("total") or 0)
+    available = float(money.get("free") or 0)
     journal["equity"], journal["available"] = equity, available
     if journal.get("start_equity") is None:
         journal["start_equity"] = equity
@@ -405,8 +491,9 @@ def run_cycle(ex, journal, cfg, symbols):
                 break
             if sym in occupied:
                 continue
-            # Свечи — БОЕВЫЕ, публичным клиентом: те же сигналы, что у бумаги
-            df = core.fetch_candles(PUBLIC, sym, cfg["timeframe"], cfg["candles"])
+            # Свечи — БОЕВЫЕ, публичным клиентом: те же сигналы, что у бумаги.
+            # В схеме susdt торгуем SBTC, а сигнал считаем по BTC/USDT.
+            df = core.fetch_candles(PUBLIC, symbols[sym], cfg["timeframe"], cfg["candles"])
             time.sleep(0.1)
             if df is None or len(df) < scfg["ema"] + 30:
                 continue
@@ -485,7 +572,7 @@ def run_cycle(ex, journal, cfg, symbols):
             opened += 1
             log(f"✅ ОТКРЫТА [{STRATEGY_RU[strat]}] {sym} {'ЛОНГ' if d == 1 else 'ШОРТ'} "
                 f"≈{fill} стоп={pos['stop']} ({risk / price:.2%}) тейк={pos['take']} "
-                f"объём {notional:.2f} USDT риск {risk_usd:.2f} USDT"
+                f"объём {notional:.2f} {cfg['currency']} риск {risk_usd:.2f} {cfg['currency']}"
                 + (f" [{note}]" if note else ""), cfg)
     return opened
 
@@ -521,17 +608,35 @@ def cmd_check(cfg):
         print("✘ Ключи не заданы. Создайте файл .env в корне проекта по образцу .env.example")
         return 2
     try:
-        ex, total, free = verify_demo_key(log=print)
+        ex, scheme, total, free = verify_demo_key(log=print)
     except NotDemoError as e:
         print(f"✘ {e}")
         return 1
+    cfg.update(product_type=SCHEMES[scheme]["product_type"],
+               currency=SCHEMES[scheme]["currency"])
+    cur = cfg["currency"]
+
     syms = demo_symbols(ex)
-    print(f"✔ Монет из нашего списка доступно в демо: {len(syms)} — "
-          + ", ".join(s.split("/")[0] for s in syms))
-    live = fetch_live_positions(ex)
+    if scheme == "susdt":
+        print(f"✔ Инструментов демо: {len(syms)} — "
+              + ", ".join(f"{d.split('/')[0]} (сигналы по {r.split('/')[0]})"
+                          for d, r in syms.items()))
+    else:
+        print(f"✔ Монет из нашего списка доступно в демо: {len(syms)} — "
+              + ", ".join(s.split("/")[0] for s in syms))
+    live = fetch_live_positions(ex, cfg)
     print(f"✔ Открытых позиций на демо-счёте: {len(live)}")
     share = total * cfg["allocation"]["donchian"]
-    print(f"✔ На стратегию: {share:.2f} USDT, риск на сделку {share * cfg['risk_pct']:.2f} USDT")
+    print(f"✔ На стратегию: {share:.2f} {cur}, риск на сделку {share * cfg['risk_pct']:.2f} {cur}")
+
+    # Ключ у Bitget один на оба счёта — честно показываем, что за ним
+    # на боевой стороне. Торговать там бот не может: см. place_order.
+    real = real_balance()
+    if real is not None:
+        print(f"· Этим же ключом виден боевой счёт: {real:.2f} USDT. "
+              + ("Заявка туда невозможна: бот ставит их только по контрактам "
+                 "с расчётом в SUSDT." if scheme == "susdt" else
+                 "Отделяет демо только заголовок PAPTRADING."))
     print("=" * 56)
     print("Всё готово. Демо-бота можно запускать из панели.")
     return 0
@@ -564,13 +669,15 @@ def main(cfg=None):
     log(f"СТАРТ {cfg['bot_name']}  риск {cfg['risk_pct']:.0%} от доли стратегии  "
         f"плечо {cfg['leverage']}x  до {cfg['max_open']} позиций на стратегию", cfg)
     try:
-        ex, total, free = verify_demo_key(log=lambda m: log(m, cfg))
+        ex, scheme, total, free = verify_demo_key(log=lambda m: log(m, cfg))
     except NotDemoError as e:
         journal["last_error"] = str(e)
         core.save_journal(journal, cfg)
         log(f"🛑 ОСТАНОВКА: {e}", cfg)
         return
     journal["last_error"] = None
+    cfg.update(product_type=SCHEMES[scheme]["product_type"],
+               currency=SCHEMES[scheme]["currency"])
 
     symbols = demo_symbols(ex)
     journal["demo_symbols"] = symbols
@@ -580,7 +687,7 @@ def main(cfg=None):
                   for s in PRIORITY},
         "risk_pct": cfg["risk_pct"], "max_open": cfg["max_open"],
         "allocation": cfg["allocation"], "leverage": cfg["leverage"],
-        "symbols": len(symbols),
+        "symbols": len(symbols), "scheme": scheme, "currency": cfg["currency"],
     }
     core.save_journal(journal, cfg)
     log(f"Монет в демо: {len(symbols)} — {', '.join(s.split('/')[0] for s in symbols)}", cfg)
@@ -594,7 +701,7 @@ def main(cfg=None):
             journal["last_error"] = None
             core.save_journal(journal, cfg)
             eq, st = journal.get("equity"), journal.get("start_equity")
-            log(f"Капитал={eq:.2f} USDT ({(eq - st):+.2f})  открыто={len(journal['open'])}  "
+            log(f"Капитал={eq:.2f} {cfg['currency']} ({(eq - st):+.2f})  открыто={len(journal['open'])}  "
                 f"сделок={len(journal['trades'])}  новых={opened}", cfg)
             if core.sleep_or_stop(cfg, cfg["scan_interval_min"] * 60):
                 log("Остановлен из панели", cfg)
