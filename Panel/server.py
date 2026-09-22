@@ -532,8 +532,30 @@ def demo_state(spec):
             "funding": sum(t.get("funding") or 0 for t in ts),
             "open": sum(1 for p in j.get("open", []) if p.get("strategy") == strat),
         }
+    # Сводка измерений — то, ради чего демо и существует: бумажный бот
+    # закладывает проскальзывание и комиссию, а тут они взяты у биржи.
+    def avg(xs):
+        return sum(xs) / len(xs) if xs else None
+    ins = [t["entry_slip_pct"] for t in trades if t.get("entry_slip_pct") is not None]
+    outs = [t["exit_slip_pct"] for t in trades if t.get("exit_slip_pct") is not None]
+    paid = [t["fees"] for t in trades if t.get("fees") is not None]
+    turnover = sum((t.get("notional") or 0) * 2 for t in trades if t.get("fees") is not None)
+    measure = {
+        "entry_slip": avg(ins), "entry_n": len(ins),
+        "exit_slip": avg(outs), "exit_n": len(outs),
+        "fees": sum(paid) if paid else None, "fees_n": len(paid),
+        "fees_pct": (sum(paid) / turnover * 100) if turnover else None,
+        "funding": sum(t.get("funding") or 0 for t in trades),
+        "funding_avg": avg([t["funding"] for t in trades if t.get("funding") is not None]),
+        "trades": len(trades),
+    }
+
     return {
         "id": "demo", "kind": "demo", "short": spec["short"], "name": meta["bot_name"],
+        "measure": measure, "purpose": meta.get("purpose"),
+        "timeframe": meta.get("timeframe"), "fixed_notional": meta.get("fixed_notional"),
+        "assumed_slippage_pct": meta.get("assumed_slippage_pct"),
+        "assumed_commission_pct": meta.get("assumed_commission_pct"),
         "rules": meta.get("rules"), "risk_pct": meta["risk_pct"], "max_open": meta["max_open"],
         "leverage": meta.get("leverage"), "symbols": meta.get("symbols"),
         "running": is_running(spec), "enabled": bool(load_desired().get("demo")),

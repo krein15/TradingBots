@@ -3,15 +3,22 @@ BotDemo/demo_trading.py
 =======================
 Демо-счёт Bitget: обе стратегии, настоящие заявки, вымышленные деньги.
 
-Зачем, если бумажные боты уже работают. Бумажный бот симулирует
-исполнение сам. Демо проверяет то, что симуляция знать не может:
-реальные заполнения и проскальзывание, срабатывание стопов на бирже,
-funding (здесь он не оценивается, а приходит от биржи в каждой
-закрытой позиции) и сам код постановки заявок.
+Это ИЗМЕРИТЕЛЬНЫЙ СТЕНД, а не проверка стратегии. Бумажный бот
+симулирует исполнение сам и закладывает проскальзывание 0.05%. Сколько
+оно на самом деле, симуляция знать не может — это знает только биржа.
+Стенд меряет ровно это: цену заполнения против цены, по которой бот
+решал входить; цену срабатывания стопа против заданного уровня;
+комиссию и funding, как их посчитала биржа.
 
-Сигналы — те же, что у бумажных ботов: по БОЕВЫМ свечам, тем же кодом.
-Поэтому демо и бумага на общих монетах торгуют одинаковые сделки, и
-расхождение между ними — это ровно цена реального исполнения.
+Таймфрейм здесь 15 минут, а не 4 часа, и край на нём заведомо
+отрицательный (см. CONFIG). Демо-счёт будет терять вымышленные деньги,
+и по его прибыли НЕЛЬЗЯ судить о стратегии — на то есть бумажные боты
+и бэктест. Младший таймфрейм взят ради числа сделок: измерение требует
+выборки, а не прибыли.
+
+Правила входа — те же, что у бумажных ботов, тем же кодом и по БОЕВЫМ
+свечам. Так измеренная цена исполнения относится к тем самым сделкам,
+которые потом будет делать настоящий бот.
 
 ── Какое это демо ─────────────────────────────────────────────
 У Bitget две схемы демо, и какая доступна ключу — выясняется только
@@ -108,11 +115,30 @@ CONFIG = {
     "leverage":        5,        # биржевое плечо: стоп 6.5%, ликвидация ~20% — стоп раньше
     "margin_mode":     "isolated",
     "margin_buffer":   1.15,     # свободной маржи нужно на 15% больше расчётной
-    "timeframe":       "4h",
+
+    # ── Это измерительный стенд, а не проверка стратегии ──────
+    # Инструментов в демо всего три, и на 4ч они дают одну-две сделки
+    # в месяц — ждать статистику исполнения пришлось бы год. Поэтому
+    # таймфрейм младший: те же правила на 15м дают около 276 сделок в
+    # месяц на трёх монетах, то есть первые выводы о заполнениях уже
+    # через неделю.
+    #
+    # Край на 15м отрицательный и это известно заранее: в поиске все
+    # 72 настройки трёх семейств на 15м убыточны, Дончиан даёт -0.32R
+    # на сделку. Демо-счёт будет терять вымышленные деньги — так и
+    # задумано. Мерим не прибыль, а исполнение: проскальзывание входа
+    # и выхода, срабатывание стопов на бирже, комиссию и funding.
+    "timeframe":       "15m",
     "candles":         400,
-    "scan_interval_min": 20,
-    "max_signal_age_min": 30,
-    "max_hold_bars":   200,
+    "scan_interval_min": 2,
+    "max_signal_age_min": 3,     # доля свечи та же, что 30 мин на 4ч
+    "max_hold_bars":   200,      # 50 часов на 15м
+
+    # Объём позиции фиксированный, а не от риска. Две причины:
+    # сравнивать качество заполнений можно только при сопоставимом
+    # размере заявки, и при риске 5% счёт на таком крае сгорел бы за
+    # две недели, оставив нас без измерений.
+    "fixed_notional":  500.0,
     # Тип контрактов и валюта счёта зависят от схемы демо и
     # проставляются при старте, после проверки на бирже
     "product_type":    None,
@@ -393,6 +419,18 @@ def settle_closed(ex, journal, pos, cfg):
         reason = "stop" if d_stop < d_take else "take"
         if min(d_stop, d_take) > 0.01:
             reason = "time"
+
+    # Насколько биржа исполнила выход хуже уровня, который мы ей
+    # задали. Это второе число, ради которого стенд существует:
+    # бумажный бот закладывает 0.05%, а сколько на самом деле —
+    # знает только биржа. Минус — хуже для нас.
+    level = pos["stop"] if reason == "stop" else pos["take"] if reason == "take" else None
+    exit_slip = round((close_px / level - 1) * pos["dir"] * 100, 4) if (close_px and level) else None
+    fees = None
+    for k in ("openFee", "closeFee", "totalFee"):
+        v = info.get(k)
+        if v not in (None, ""):
+            fees = (fees or 0) + float(v)
     r = (net / pos["risk_usd"]) if (net is not None and pos.get("risk_usd")) else None
 
     if net is None:
@@ -412,6 +450,7 @@ def settle_closed(ex, journal, pos, cfg):
 
     journal["trades"].append({
         **pos, "exit": close_px, "pnl": net, "funding": funding,
+        "exit_slip_pct": exit_slip, "fees": fees,
         "r_multiple": round(r, 3) if r is not None else None,
         "result": ("WIN" if net > 0 else "LOSS") if net is not None else "UNKNOWN",
         "exit_reason": reason if net is not None else "неизвестно",
@@ -422,6 +461,8 @@ def settle_closed(ex, journal, pos, cfg):
         f"{'ЛОНГ' if pos['dir'] == 1 else 'ШОРТ'} [{reason}] "
         f"итог {net if net is not None else '?'} {cfg['currency']}"
         + (f" ({r:+.2f}R)" if r is not None else "")
+        + (f", проскальзывание выхода {exit_slip:+.3f}%" if exit_slip is not None else "")
+        + (f", комиссия {fees:.4f}" if fees is not None else "")
         + (f", funding {funding:+.4f}" if funding else ""), cfg)
     return True
 
@@ -518,16 +559,19 @@ def run_cycle(ex, journal, cfg, symbols):
             stop = price - risk if d == 1 else price + risk
             take = price + risk * scfg["rr"] if d == 1 else price - risk * scfg["rr"]
 
+            # Объём фиксированный — см. CONFIG. Доля стратегии остаётся
+            # верхней границей: стенд не должен занять весь счёт.
             share = equity * cfg["allocation"][strat]
-            risk_usd = share * cfg["risk_pct"]
-            qty = risk_usd / risk
-            notional = qty * price
+            notional = cfg["fixed_notional"]
             cap = share * cfg["max_notional"]
             note = ""
             if notional > cap:
-                qty, notional, note = cap / price, cap, "урезано по объёму"
+                notional, note = cap, "урезано по доле стратегии"
+            qty = notional / price
+            risk_usd = qty * risk
             qty = float(ex.amount_to_precision(sym, qty))
             notional = qty * price
+            risk_usd = qty * risk          # после округления объёма — точный
             min_cost = ((ex.market(sym).get("limits") or {}).get("cost") or {}).get("min") or 5
             if qty <= 0 or notional < min_cost:
                 log(f"⏭️  [{STRATEGY_RU[strat]}] {sym}: объём {notional:.2f} меньше минимума", cfg)
@@ -554,9 +598,14 @@ def run_cycle(ex, journal, cfg, symbols):
                 journal["acted"][key] = datetime.now().isoformat()
                 continue
 
+            # Ради этих двух чисел стенд и существует: по какой цене бот
+            # решал войти и по какой биржа его пустила. Знак: минус —
+            # хуже для нас, и для лонга, и для шорта.
             fill = order.get("average") or price
+            slip = (fill / price - 1) * -d * 100 if fill and price else None
             pos = {
                 "strategy": strat, "symbol": sym, "dir": d, "type": sig["type"],
+                "decision_price": price, "entry_slip_pct": round(slip, 4) if slip is not None else None,
                 "entry": fill, "stop": float(ex.price_to_precision(sym, stop)),
                 "take": float(ex.price_to_precision(sym, take)), "qty": qty,
                 "notional": round(notional, 2), "risk_usd": round(qty * risk, 4),
@@ -573,6 +622,7 @@ def run_cycle(ex, journal, cfg, symbols):
             log(f"✅ ОТКРЫТА [{STRATEGY_RU[strat]}] {sym} {'ЛОНГ' if d == 1 else 'ШОРТ'} "
                 f"≈{fill} стоп={pos['stop']} ({risk / price:.2%}) тейк={pos['take']} "
                 f"объём {notional:.2f} {cfg['currency']} риск {risk_usd:.2f} {cfg['currency']}"
+                + (f" проскальзывание входа {slip:+.3f}%" if slip is not None else "")
                 + (f" [{note}]" if note else ""), cfg)
     return opened
 
@@ -627,7 +677,10 @@ def cmd_check(cfg):
     live = fetch_live_positions(ex, cfg)
     print(f"✔ Открытых позиций на демо-счёте: {len(live)}")
     share = total * cfg["allocation"]["donchian"]
-    print(f"✔ На стратегию: {share:.2f} {cur}, риск на сделку {share * cfg['risk_pct']:.2f} {cur}")
+    print(f"✔ На стратегию: {share:.2f} {cur}, объём позиции {cfg['fixed_notional']:.0f} {cur}")
+    print(f"· Стенд измеряет исполнение: таймфрейм {cfg['timeframe']}, опрос раз в "
+          f"{cfg['scan_interval_min']} мин. Край на этом таймфрейме отрицательный, "
+          f"счёт будет терять вымышленные деньги — это не проверка стратегии.")
 
     # Ключ у Bitget один на оба счёта — честно показываем, что за ним
     # на боевой стороне. Торговать там бот не может: см. place_order.
@@ -688,6 +741,15 @@ def main(cfg=None):
         "risk_pct": cfg["risk_pct"], "max_open": cfg["max_open"],
         "allocation": cfg["allocation"], "leverage": cfg["leverage"],
         "symbols": len(symbols), "scheme": scheme, "currency": cfg["currency"],
+        "timeframe": cfg["timeframe"], "fixed_notional": cfg["fixed_notional"],
+        "scan_interval_min": cfg["scan_interval_min"],
+        # Панель по этому признаку пишет, что демо — стенд измерения
+        # исполнения, а не проверка стратегии
+        "purpose": "execution",
+        # Что закладывает бумажный бот — чтобы панель показывала факт
+        # рядом с допущением
+        "assumed_slippage_pct": STRATEGIES["donchian"]["slippage"] * 100,
+        "assumed_commission_pct": STRATEGIES["donchian"]["commission"] * 100,
     }
     core.save_journal(journal, cfg)
     log(f"Монет в демо: {len(symbols)} — {', '.join(s.split('/')[0] for s in symbols)}", cfg)

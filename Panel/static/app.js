@@ -298,9 +298,10 @@ function renderDemo() {
           d.name, h("span", { class: "demo-badge" }, "демо-счёт")),
         h("div", { class: "bot-rules" },
           "Настоящие заявки, вымышленные деньги · обе стратегии на одном счёте · " +
-          (d.symbols ? `${d.symbols} монет · ` : "") +
+          (d.symbols ? `${d.symbols} инструмента · ` : "") +
+          (d.timeframe ? `ТФ ${d.timeframe} · ` : "") +
           (d.leverage ? `плечо ${d.leverage}x · ` : "") +
-          `риск ${Math.round(d.risk_pct * 100)}% доли стратегии · до ${d.max_open} позиций на стратегию`)),
+          (d.fixed_notional ? `объём ${d.fixed_notional} на позицию` : ""))),
       h("span", { class: "status " + stateCls }, h("span", { class: "status-dot" }), stateTxt),
       checkBtn, startBtn),
   ];
@@ -322,24 +323,53 @@ function renderDemo() {
       h("div", { class: "check-out", style: "margin-top:8px" }, demoCheck.output.trim())));
   }
 
+  // Демо — стенд измерения исполнения. Без этой оговорки его убыток
+  // читался бы как приговор стратегии, хотя таймфрейм здесь другой
+  // и край на нём отрицателен заведомо.
+  if (d.purpose === "execution") {
+    kids.push(h("div", { class: "callout note" },
+      h("b", {}, "Это стенд измерения исполнения, а не проверка стратегии. "),
+      `Таймфрейм ${d.timeframe || "15m"} взят ради числа сделок: инструментов в демо три, `
+      + "на 4ч они дают одну-две сделки в месяц. Край на этом таймфрейме отрицательный, "
+      + "и счёт будет терять вымышленные деньги — это ожидаемо. Смысл здесь имеют "
+      + "проскальзывание, комиссия и funding, а не прибыль."));
+  }
+
   if (d.equity != null) {
     const res = d.start_equity != null ? d.equity - d.start_equity : null;
-    const funding = Object.values(d.per_strategy).reduce((a, x) => a + (x.funding || 0), 0);
     const tile = (label, value, sub, cls) => h("div", { class: "tile" },
       h("div", { class: "tile-label" }, label), h("div", { class: "tile-value " + (cls || "") }, value),
       sub ? h("div", { class: "tile-sub" }, sub) : null);
     // На демо Bitget деньги вымышленные и называются SUSDT — пишем
     // ту валюту, которую сообщил бот, а не «USDT» наугад
     const cur = d.currency || "USDT";
-    const usdt = v => v == null ? "—" : v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " " + cur;
+    // Знак минуса — типографский, как в остальной панели
+    const usdt = v => v == null ? "—" : (v < 0 ? "−" : "")
+      + Math.abs(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " " + cur;
+    const m = d.measure || {};
+    // Проскальзывание: минус — исполнили хуже, чем мы рассчитывали
+    const slip = v => v == null ? "—" : (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v).toFixed(3) + "%";
+    const assumed = d.assumed_slippage_pct;
+
     kids.push(h("div", { class: "tiles" },
-      tile("Капитал демо-счёта", usdt(d.equity),
-        "по данным биржи, вместе с открытыми позициями"
-        + (d.start_equity != null ? ` · старт ${usdt(d.start_equity)}` : "")),
-      tile("Результат", res == null ? "—" : arrow(res) + (res > 0 ? "+" : "") + usdt(res),
-        "с учётом открытых позиций", tone(res)),
-      tile("Свободная маржа", usdt(d.available), null),
-      tile("Funding", usdt(funding), "по закрытым позициям, от биржи", tone(funding))));
+      tile("Проскальзывание входа", slip(m.entry_slip),
+        m.entry_n ? `по ${m.entry_n} сделкам · бумага закладывает ${assumed ? assumed.toFixed(2) : "0.05"}%`
+                  : "ждём первых сделок", tone(m.entry_slip)),
+      tile("Проскальзывание выхода", slip(m.exit_slip),
+        m.exit_n ? `по ${m.exit_n} сделкам · насколько стоп исполнен хуже уровня`
+                 : "ждём первых выходов", tone(m.exit_slip)),
+      tile("Комиссия", m.fees_pct == null ? "—" : m.fees_pct.toFixed(3) + "%",
+        m.fees == null ? "от оборота, по данным биржи"
+                       : `${m.fees.toFixed(2)} ${cur} · заложено ${(d.assumed_commission_pct || 0.06).toFixed(2)}%`),
+      tile("Funding", m.funding == null ? "—" : usdt(m.funding),
+        m.funding_avg == null ? "плата за удержание, от биржи"
+                              : `${usdt(m.funding_avg)} на сделку`, tone(m.funding))));
+
+    kids.push(h("div", { class: "demo-money" },
+      h("span", {}, `Капитал демо-счёта: `, h("b", {}, usdt(d.equity)),
+        res == null ? "" : ` (${res > 0 ? "+" : ""}${res.toFixed(2)} с начала)`),
+      h("span", {}, `Свободная маржа: `, h("b", {}, usdt(d.available))),
+      h("span", {}, `Сделок измерено: `, h("b", {}, String(m.trades || 0)))));
 
     kids.push(h("div", { class: "strat-rows" }, ["donchian", "supertrend"].map(s => {
       const x = d.per_strategy[s];
