@@ -358,9 +358,11 @@ function renderDemo() {
       tile("Проскальзывание выхода", slip(m.exit_slip),
         m.exit_n ? `по ${m.exit_n} сделкам · насколько стоп исполнен хуже уровня`
                  : "ждём первых выходов", tone(m.exit_slip)),
-      tile("Комиссия", m.fees_pct == null ? "—" : m.fees_pct.toFixed(3) + "%",
+      // Комиссия — это расход, биржа отдаёт её со знаком минус.
+      // Показываем величину: «0.060%», а не «−0.060%».
+      tile("Комиссия", m.fees_pct == null ? "—" : Math.abs(m.fees_pct).toFixed(3) + "%",
         m.fees == null ? "от оборота, по данным биржи"
-                       : `${m.fees.toFixed(2)} ${cur} · заложено ${(d.assumed_commission_pct || 0.06).toFixed(2)}%`),
+                       : `${Math.abs(m.fees).toFixed(2)} ${cur} · заложено ${(d.assumed_commission_pct || 0.06).toFixed(2)}%`),
       tile("Funding", m.funding == null ? "—" : usdt(m.funding),
         m.funding_avg == null ? "плата за удержание, от биржи"
                               : `${usdt(m.funding_avg)} на сделку`, tone(m.funding))));

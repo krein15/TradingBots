@@ -400,9 +400,13 @@ def settle_closed(ex, journal, pos, cfg):
     try:
         hist = ex.fetch_positions_history([pos["symbol"]], opened_ms - 60_000, 20,
                                           {"productType": cfg["product_type"]})
+        # По номеру позиции — однозначно. По монете и стороне можно
+        # перепутать: за день по одной монете бывает несколько сделок.
+        by_id = [h for h in hist
+                 if pos.get("position_id") and (h.get("info") or {}).get("positionId") == pos["position_id"]]
         side = "long" if pos["dir"] == 1 else "short"
-        cands = [h for h in hist if (h.get("info") or {}).get("holdSide") == side
-                 and int((h.get("info") or {}).get("utime") or 0) >= opened_ms]
+        cands = by_id or [h for h in hist if (h.get("info") or {}).get("holdSide") == side
+                          and int((h.get("info") or {}).get("utime") or 0) >= opened_ms]
         rec = max(cands, key=lambda h: int(h["info"]["utime"])) if cands else None
     except Exception as e:
         log(f"[!] История позиций {pos['symbol']}: {type(e).__name__}: {str(e)[:120]}", cfg)
@@ -411,6 +415,14 @@ def settle_closed(ex, journal, pos, cfg):
     net = float(info["netProfit"]) if info.get("netProfit") not in (None, "") else None
     funding = float(info["totalFunding"]) if info.get("totalFunding") not in (None, "") else None
     close_px = float(info["closeAvgPrice"]) if info.get("closeAvgPrice") not in (None, "") else None
+    open_px = float(info["openAvgPrice"]) if info.get("openAvgPrice") not in (None, "") else None
+
+    # Цена открытия по данным биржи — источник истины. Если при входе
+    # узнать её не вышло, измеряем проскальзывание входа здесь: этот
+    # ответ приходит всегда, а ответ на заявку средней цены не содержит.
+    if open_px and pos.get("decision_price"):
+        pos["entry"] = open_px
+        pos["entry_slip_pct"] = round((open_px / pos["decision_price"] - 1) * -pos["dir"] * 100, 4)
 
     reason = "другое"
     if close_px:
@@ -601,11 +613,29 @@ def run_cycle(ex, journal, cfg, symbols):
             # Ради этих двух чисел стенд и существует: по какой цене бот
             # решал войти и по какой биржа его пустила. Знак: минус —
             # хуже для нас, и для лонга, и для шорта.
-            fill = order.get("average") or price
-            slip = (fill / price - 1) * -d * 100 if fill and price else None
+            #
+            # Ответ на заявку среднюю цену исполнения не содержит, и
+            # раньше здесь подставлялась цена решения — проскальзывание
+            # входа выходило ровно нулевым во всех сделках, то есть
+            # стенд мерил сам себя. Спрашиваем цену у биржи.
+            fill, pos_id = order.get("average"), None
+            try:
+                live_now = fetch_live_positions(ex, cfg).get(sym) or {}
+                info_now = live_now.get("info") or {}
+                real = info_now.get("openAvgPrice") or live_now.get("entryPrice")
+                if real:
+                    fill = float(real)
+                pos_id = info_now.get("positionId")
+            except Exception as e:
+                log(f"[!] {sym}: не удалось узнать цену исполнения — "
+                    f"{type(e).__name__}: {str(e)[:100]}", cfg)
+            if fill is None:
+                fill = price          # цены нет: вход запишем, измерение — нет
+            slip = (fill / price - 1) * -d * 100 if order.get("average") or pos_id else None
             pos = {
                 "strategy": strat, "symbol": sym, "dir": d, "type": sig["type"],
                 "decision_price": price, "entry_slip_pct": round(slip, 4) if slip is not None else None,
+                "position_id": pos_id,
                 "entry": fill, "stop": float(ex.price_to_precision(sym, stop)),
                 "take": float(ex.price_to_precision(sym, take)), "qty": qty,
                 "notional": round(notional, 2), "risk_usd": round(qty * risk, 4),
