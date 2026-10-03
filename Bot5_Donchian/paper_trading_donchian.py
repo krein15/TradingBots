@@ -37,6 +37,7 @@ paper_trading_donchian.py
 
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -405,6 +406,29 @@ def discover_symbols(exchange, cfg, allowed=None):
     return [s for s, _ in rows[:cfg["max_symbols"]]], None
 
 
+def why(e, limit=150):
+    """
+    Короткая причина ошибки, годная для чтения человеком.
+
+    ccxt кладёт в сообщение весь URL запроса, а настоящая причина стоит
+    в конце. Урезая строку с начала, мы 02.10 записали в журнал 15 раз
+    «NetworkError: bitget GET https://api.bitget.com/...» и ни разу —
+    то, из-за чего всё встало. Поэтому URL выбрасываем.
+
+    Отдельно распознаётся «подключение отвергнуто»: почти всегда это
+    значит, что не поднят VPN или прокси, через который идёт биржа, а
+    не что биржа лежит. Это самая частая причина простоя, и её стоит
+    называть словами.
+    """
+    text = re.sub(r"https?://\S+", "", str(e)).strip(" -:")
+    text = re.sub(r"\s+", " ", text)
+    low = text.lower()
+    if "10061" in low or "refused" in low or "отверг" in low:
+        text = ("соединение отвергнуто — похоже, не запущен VPN или прокси, "
+                "через который идёт доступ к бирже. " + text)
+    return f"{type(e).__name__}: {text[:limit]}"
+
+
 class DataUnavailable(Exception):
     """Биржа не отдала данные ни по одному инструменту — цикл был бы вслепую."""
 
@@ -438,7 +462,7 @@ def fetch_candles(exchange, symbol, timeframe, limit, errors=None):
         # получал пустоту, писал «Баланс=...» как при успехе — и никто
         # об этом не знал. Теперь причина уходит вызывающему коду.
         if errors is not None:
-            errors.append(f"{symbol.split('/')[0]}: {type(e).__name__}: {str(e)[:120]}")
+            errors.append(f"{symbol.split('/')[0]}: {why(e, 120)}")
         return None
 
 
@@ -968,7 +992,7 @@ def main(cfg=None):
             break
         except Exception as e:
             fails += 1
-            log(f"ОШИБКА: {type(e).__name__}: {e} — повтор через 5 мин", cfg)
+            log(f"ОШИБКА: {why(e, 220)} — повтор через 5 мин", cfg)
             # Закрытия, уже сделанные в этом цикле до ошибки, не теряем
             try:
                 save_journal(journal, cfg)

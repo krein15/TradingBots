@@ -409,7 +409,7 @@ def settle_closed(ex, journal, pos, cfg):
                           and int((h.get("info") or {}).get("utime") or 0) >= opened_ms]
         rec = max(cands, key=lambda h: int(h["info"]["utime"])) if cands else None
     except Exception as e:
-        log(f"[!] История позиций {pos['symbol']}: {type(e).__name__}: {str(e)[:120]}", cfg)
+        log(f"[!] История позиций {pos['symbol']}: {core.why(e, 120)}", cfg)
 
     info = (rec or {}).get("info") or {}
     net = float(info["netProfit"]) if info.get("netProfit") not in (None, "") else None
@@ -809,7 +809,7 @@ def main(cfg=None):
         except Exception as e:
             journal["last_error"] = f"{type(e).__name__}: {str(e)[:200]}"
             core.save_journal(journal, cfg)
-            log(f"ОШИБКА: {type(e).__name__}: {e} — повтор через 5 мин", cfg)
+            log(f"ОШИБКА: {core.why(e, 220)} — повтор через 5 мин", cfg)
             if core.sleep_or_stop(cfg, 300):
                 log("Остановлен из панели", cfg)
                 break
