@@ -39,6 +39,8 @@ import pandas as pd
 FILL_LIMIT = "limit"     # честная лимитка: цена должна дойти до уровня
 FILL_TOUCH = "touch"     # как в бумажном боте: цена подошла на +-tolerance
 FILL_MARKET = "market"   # рыночный вход по открытию следующей свечи
+FILL_LIMIT_QUEUE = "limit_queue"   # лимитка с поправкой на очередь:
+                                  # цена должна пройти уровень насквозь
 
 
 @dataclass
@@ -110,7 +112,7 @@ class Engine:
     def __init__(self, cfg, signal_fn,
                  deposit=50.0, risk_pct=0.05, max_open=5,
                  commission=0.001, slippage=0.0005,
-                 fill_model=FILL_LIMIT, touch_tolerance=0.003,
+                 fill_model=FILL_LIMIT, touch_tolerance=0.003, limit_edge=0.0005,
                  max_wait_bars=10, cooldown_minutes=120,
                  bad_hours=(), max_leverage=1.0,
                  signal_max_age_bars=3,
@@ -124,6 +126,7 @@ class Engine:
         self.slippage = slippage
         self.fill_model = fill_model
         self.touch_tolerance = touch_tolerance
+        self.limit_edge = limit_edge
         self.max_wait_bars = max_wait_bars
         self.cooldown_ms = cooldown_minutes * 60_000
         self.bad_hours = set(bad_hours)
@@ -263,10 +266,18 @@ class Engine:
         if self.fill_model == FILL_TOUCH:
             lo, hi = entry * (1 - self.touch_tolerance), entry * (1 + self.touch_tolerance)
             return entry if (l <= hi and h >= lo) else None
-        # FILL_LIMIT: цена должна реально дойти до уровня
+        # FILL_LIMIT: цена должна реально дойти до уровня.
+        # FILL_LIMIT_QUEUE: этого мало. Лимитка стоит в очереди, и когда
+        # цена лишь коснулась уровня, исполняются заявки, вставшие туда
+        # раньше, а наша остаётся висеть. Насколько раньше — по свечам
+        # не узнать, поэтому требуем, чтобы цена прошла уровень
+        # НАСКВОЗЬ на limit_edge. Это грубая, но честная замена
+        # неизвестной длины очереди: разница между двумя моделями и
+        # показывает, насколько вывод держится на допущении.
+        edge = self.limit_edge if self.fill_model == FILL_LIMIT_QUEUE else 0.0
         if order.direction == 1:
-            return entry if l <= entry else None
-        return entry if h >= entry else None
+            return entry if l <= entry * (1 - edge) else None
+        return entry if h >= entry * (1 + edge) else None
 
     # ── Главный цикл ──────────────────────────────────────────
     def run(self, symbols_data, regime_lookup=None, btc_lookup=None,

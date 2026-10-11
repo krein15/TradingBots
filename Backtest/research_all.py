@@ -88,9 +88,13 @@ def load(tf, d0, d1):
     return out
 
 
-def single_family(sd, name, space, train, test, min_tr=60, min_te=30):
-    a = search.evaluate(sd, name, space, train, FEE, SLIP, max_open=5, verbose=False)
-    b = search.evaluate(sd, name, space, test, FEE, SLIP, max_open=5, verbose=False)
+def single_family(sd, name, space, train, test, min_tr=60, min_te=30,
+                  fill_model=None, max_wait_bars=1):
+    kw = {"max_open": 5, "verbose": False, "max_wait_bars": max_wait_bars}
+    if fill_model:
+        kw["fill_model"] = fill_model
+    a = search.evaluate(sd, name, space, train, FEE, SLIP, **kw)
+    b = search.evaluate(sd, name, space, test, FEE, SLIP, **kw)
     if a.empty or b.empty:
         return None
     keys = [k for k in space if k in a.columns]

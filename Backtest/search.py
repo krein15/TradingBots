@@ -115,13 +115,16 @@ def slice_period(symbols_data, start, end):
 
 def run_one(prepared, commission, slippage, max_open, cooldown_min,
             trail_atr=None, max_hold_bars=None, deposit=BIG_DEPOSIT,
-            risk=SMALL_RISK):
+            risk=SMALL_RISK, fill_model=FILL_MARKET, max_wait_bars=1):
+    # fill_model: рыночный вход (тейкер) или лимитный (мейкер). На 4ч
+    # разница в комиссии безразлична, на младших тф она решает всё:
+    # тейкером круг стоит 0.174%, мейкером 0.04%.
     eng = Engine(
         cfg={}, signal_fn=strategies.signal_fn,
         deposit=deposit, risk_pct=risk, max_open=max_open,
         commission=commission, slippage=slippage,
-        fill_model=FILL_MARKET,          # пробой берём рынком по следующему открытию
-        max_wait_bars=1,                 # заявка живёт один бар
+        fill_model=fill_model,
+        max_wait_bars=max_wait_bars,
         cooldown_minutes=cooldown_min,
         bad_hours=(), max_leverage=1000.0,
         trail_atr=trail_atr, max_hold_bars=max_hold_bars,
@@ -137,7 +140,8 @@ def grid(space):
 
 
 def evaluate(symbols_data, strategy, space, period, commission, slippage,
-             max_open=5, cooldown_min=0, verbose=True, label=""):
+             max_open=5, cooldown_min=0, verbose=True, label="",
+             fill_model=FILL_MARKET, max_wait_bars=1):
     """Прогоняем всю сетку по одному периоду."""
     part = slice_period(symbols_data, *period)
     combos = grid(space)
@@ -148,7 +152,8 @@ def evaluate(symbols_data, strategy, space, period, commission, slippage,
             continue
         eng = run_one(prepared, commission, slippage, max_open, cooldown_min,
                       trail_atr=params.get("trail_atr"),
-                      max_hold_bars=params.get("max_hold_bars"))
+                      max_hold_bars=params.get("max_hold_bars"),
+                      fill_model=fill_model, max_wait_bars=max_wait_bars)
         m = r_metrics(eng)
         m.update({"strategy": strategy, **params})
         rows.append(m)
