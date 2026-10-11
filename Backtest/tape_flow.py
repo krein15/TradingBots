@@ -52,7 +52,9 @@ except Exception:
 from Backtest import tape  # noqa: E402
 
 COST = 0.174          # круг тейкером, % — комиссия + измеренное проскальзывание
-HORIZONS = (60, 300, 900, 3600)   # секунд после входа
+# Секунды после входа. Короткие горизонты обязательны: в описании
+# стратегии сделка живёт секунды, а не минуты.
+HORIZONS = (5, 15, 30, 60, 300, 900)
 
 
 def orders(df):
@@ -101,12 +103,20 @@ def forward(o, idx, horizons):
     return res
 
 
-def baseline(o, n, horizons, seed=7):
-    """Тот же замер из случайных моментов — фон, с которым сравниваем."""
+def baseline(o, n, horizons, obs_sides, seed=7):
+    """
+    Тот же замер из случайных моментов — фон, с которым сравниваем.
+
+    Сторона берётся из НАБЛЮДЁННОГО распределения серий: сигнал
+    считается в сторону робота, и сравнивать его с ненаправленным
+    дрейфом рынка нельзя — при росте рынка любая покупка в плюсе.
+    """
     rng = np.random.default_rng(seed)
     idx = rng.integers(0, len(o) - 1, size=min(n * 5, 20000))
-    rows = [forward(o, int(i), horizons) for i in idx]
-    return np.nanmean(np.array(rows), axis=0)
+    rows = [forward(o, int(j), horizons) for j in idx]
+    sides = rng.choice(obs_sides, size=len(idx))
+    return np.nanmean(np.array(rows) * sides[:, None], axis=0)
+
 
 
 def main():
@@ -142,7 +152,7 @@ def main():
         side = np.array([s for _, s in sig])
         # доход, если встать В СТОРОНУ робота
         prof = rows * side[:, None]
-        base = baseline(o, len(sig), HORIZONS)
+        base = baseline(o, len(sig), HORIZONS, side)
         all_sig.append((c, prof, base, len(o), days))
         total += len(sig)
         print(f"  {c:<6} заявок {len(o):>7,}  за {days:>4.1f} сут  серий {len(sig):>4}  "
