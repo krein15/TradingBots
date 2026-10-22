@@ -1,3 +1,10 @@
+<a href="https://kreinstudio.ru/">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/logo-dark@2x.png">
+    <img src="assets/brand/logo-light@2x.png" alt="krein — студия разработки" width="260">
+  </picture>
+</a>
+
 # TradingBots
 
 **Торговые боты на Python с честным бэктестером и панелью управления.**
